@@ -14,3 +14,56 @@
   - `tests/ascii_testdata.rs` 复刻 TS 的 whitespace normalize 规则
   - `tests/svg_smoke.rs` 做 SVG 冒烟测试
 - 验证：`cargo test` 全通过
+
+## 2026-01-30 20:47 - 补充集成使用说明
+
+- 更新 `README.md`：补齐“在其他 Rust 项目中集成”的说明
+  - `Cargo.toml` 的 `path` / `git` 依赖示例
+  - 主题（`THEMES`）的使用方式
+  - Tokio/async 的 `spawn_blocking` 建议
+  - 多线程与构建环境注意事项
+
+## 2026-01-30 21:00 - 修复 CLI 输出末尾换行与 BrokenPipe
+
+- 修复 `src/main.rs`：CLI 输出统一补齐末尾换行，避免 zsh 提示符 `%` 粘在输出末尾
+- 兼容管道场景：stdout 写入遇到 BrokenPipe 时不 panic，按 Unix 习惯 0 退出
+- 验证：`cargo test` 全通过；pipe 到 `head` 不再触发 Broken pipe panic
+
+## 2026-02-01 00:41 - 补齐 CLI 自说明 + 生成 code agent 命令行用法文档
+
+- 改良 `src/main.rs`：支持 `--help/-h`、`--version/-V`，并把参数解析前置（不再因空 stdin 触发 QuickJS 异常）
+- 增加参数校验：未知参数 / 错误组合直接返回 exit code `2`，减少 agent 的“盲猜式重试”
+- 新增文档：`docs/code-agent-cli.md`（给 code agent 的可复制命令范式、批处理与排错指南）
+- 同步 `README.md`：CLI 示例改用 `beautiful-mermaid-rs`，并指向上述文档
+- 验证：`cargo test` 通过；`beautiful-mermaid-rs --help/--version` 正常；SVG 渲染冒烟通过
+
+## 2026-02-01 20:38 - 新增仓库贡献者指南（AGENTS.md）
+
+- 新增 `AGENTS.md`：说明项目结构、关键命令、测试约定、提交/PR 规范（面向贡献者的一页纸指南）
+
+## 2026-02-01 20:55 - 修复 Flowchart/State 的 Unicode 节点 ID（中文 ID）渲染异常
+
+- 根因在上游 TS 版 `beautiful-mermaid`：Flowchart/State parser 用 `\\w`/`[\\w-]` 匹配 ID，中文被解析丢失，最终进入 dagre 空图布局导致 `-Infinity`
+- 同步上游修复后的 browser bundle：
+  - 从 `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/dist/beautiful-mermaid.browser.global.js`
+  - 拷贝到 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+- 新增 Rust 侧回归测试：`tests/unicode_id_smoke.rs`
+- 验证：`cargo test` 通过；`graph TD\\n开始 --> 结束\\n` 的 SVG/ASCII 输出正常
+
+## 2026-02-01 21:06 - 增加一键同步 vendor bundle 的脚本与 Make 目标
+
+- 新增脚本：`scripts/sync-vendor-bundle.sh`（TS 侧 `bun run build` → 拷贝到 Rust vendor → 可选 `cargo test` 验证）
+- Makefile 增加目标：
+  - `make sync-vendor`：只同步，不跑 Rust 测试
+  - `make sync-vendor-verify`：同步 + `cargo test`（推荐）
+- 文档同步：`README.md` 补充“同步上游 bundle（开发者）”说明
+- 验证：`make sync-vendor-verify` 执行成功
+
+## 2026-02-01 22:12 - 同步上游“宽字符宽度”修复，解决中文边框错位
+
+- 上游 TS 版已修复：中文/emoji 等宽字符在 ASCII/Unicode 渲染里不再把边框“顶出去”
+- 本仓库同步最新 browser bundle：`vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+- Rust 侧补充回归断言：`tests/unicode_id_smoke.rs` 额外校验“每一行终端显示宽度一致”
+- 验证：
+  - `cargo test` ✅
+  - `graph TD\\n开始 --> 结束\\n` 的 ASCII 输出边框对齐 ✅

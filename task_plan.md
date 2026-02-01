@@ -43,8 +43,9 @@
 
 ## 状态
 **已完成**
-- 交付物：Rust crate + vendor bundle + 测试 + 文档
-- 下一步：如果要“路线A（纯 Rust）”，建议先从 ASCII 引擎开始逐模块替换（保持测试不变）
+- 已补齐 CLI 的自说明能力：支持 `--help/-h`、`--version/-V`，并且在 stdin 为空时给出明确提示。
+- 已新增 code agent 专用 CLI 说明：`docs/code-agent-cli.md`。
+- 已同步 README 的 CLI 示例为 `beautiful-mermaid-rs ...`。
 
 ## 进展日志
 
@@ -54,3 +55,63 @@
 - 已完成 Rust 侧封装：`rquickjs` 内嵌 QuickJS，调用 `beautifulMermaid.renderMermaid/renderMermaidAscii`
 - 已复刻 TS 版 golden testdata（ASCII/Unicode）到 `tests/testdata/`
 - 已实现 Rust 测试对齐 TS 的 whitespace normalize 逻辑，`cargo test` 全通过
+
+### 2026-01-30 20:47
+- 根据“在其他 Rust 程序里集成使用”的需求，补充 README 的集成说明（依赖方式、主题用法、Tokio/多线程注意事项）
+
+### 2026-01-30 21:00
+- 修复 CLI 输出末尾缺少换行：避免 zsh 把提示符 `%` 粘在渲染结果后面
+- 顺手处理 stdout 的 BrokenPipe：在 pipe 场景下（下游提前关闭）不再 panic，而是按 Unix 习惯静默退出
+- 验证：`cargo test` 通过；`printf ... | cargo run -- --ascii` 末尾带换行；`| head -n 1` 不再出现 Broken pipe panic
+
+### 2026-02-01 00:35
+- 新需求：已安装为系统 PATH 命令 `beautiful-mermaid-rs`，需要补一份“给 code agent 的 CLI 使用说明”。
+- 计划：
+  - 先以 `beautiful-mermaid-rs --help/--version` 作为事实来源，确认真实参数与默认行为。
+  - 再补一份面向 agent 的“最小可用范式”（stdin/file、svg/ascii、输出目录、批处理）。
+  - 最后写入项目文档，并用几条命令做冒烟验证（确保示例不跑偏）。
+
+### 2026-02-01 00:41
+- 改良 CLI：`src/main.rs` 增加 `--help/-h`、`--version/-V`，并把“参数解析”前置，避免空 stdin 直接触发 QuickJS 异常。
+- 增加“强约束”提示：未知参数/错误组合直接返回 exit code `2`，让 agent 更容易定位问题。
+- 新增文档：`docs/code-agent-cli.md`（面向 code agent 的可复制命令范式、批处理、排错）。
+- 同步 README 的 CLI 示例为 `beautiful-mermaid-rs`，并链接到上述文档。
+- 验证：`cargo test` 通过；`beautiful-mermaid-rs --help/--version` 正常；渲染 SVG 冒烟通过。
+
+### 2026-02-01 20:38
+- 新需求：为本仓库补齐 `AGENTS.md`（Repository Guidelines），作为贡献者指南。
+- 计划：
+  - 盘点仓库结构（`src/`/`tests/`/`vendor/`/`docs/`）与关键入口文件。
+  - 总结构建/测试/运行命令（`cargo`/`make`）。
+  - 从 `git log` 提取当前提交信息风格，给出可延续的约定。
+  - 产出 200-400 words 的 `AGENTS.md`，内容以“可执行、可复现”为导向。
+- 完成：
+  - 已新增 `AGENTS.md`（贡献者指南）。
+  - 验证：`cargo test` 通过。
+
+### 2026-02-01 20:55
+- 新需求：Flowchart/State 的节点 ID 使用中文/Unicode 时输出 `-Infinity` 或空白，需要修复到“真正支持 Unicode id”。
+- 处理：
+  - 已在上游 TS 项目修复 parser 的 ID 匹配（从 `\\w` 扩展到 Unicode 属性类），并重建 `dist/beautiful-mermaid.browser.global.js`
+  - 已同步更新本仓库 vendor bundle：`vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+  - 已新增 Rust 侧回归测试：`tests/unicode_id_smoke.rs`
+- 验证：
+  - `cargo test` 通过
+  - `printf 'graph TD\\n开始 --> 结束\\n' | beautiful-mermaid-rs` 输出 SVG 正常（不含 `-Infinity`）
+
+### 2026-02-01 21:04
+- 新需求：我建议补一个“一键同步 vendor bundle”的脚本/Makefile target，避免以后改了 TS 却忘记更新 Rust 的 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`。
+- 计划：
+  - 增加 `scripts/sync-vendor-bundle.sh`：自动 `bun run build`（TS 仓库）并拷贝产物到 Rust vendor
+  - Makefile 增加 `sync-vendor` / `sync-vendor-verify` 目标，做到一条命令跑完同步 + 验证
+  - 验证：跑一遍 `make sync-vendor-verify`，确认中文/Unicode ID 的测试能兜底
+
+### 2026-02-01 22:12
+- 新需求：ASCII/Unicode 输出在中文等“宽字符”场景下边框错位（终端显示宽度与字符串长度不一致）。
+- 处理：
+  - 已在上游 TS 项目修复宽字符显示宽度（简化版 wcwidth + 输出跳列），并通过 `bun test`。
+  - 使用 `scripts/sync-vendor-bundle.sh` 重新构建并同步最新 `dist/beautiful-mermaid.browser.global.js` 到本仓库 `vendor/beautiful-mermaid/`。
+  - Rust 侧补充回归断言：`tests/unicode_id_smoke.rs` 增加“每一行终端显示宽度一致”的检查，防止 vendor 回退。
+- 验证：
+  - `cargo test` 通过
+  - `printf 'graph TD\\n开始 --> 结束\\n' | cargo run --quiet -- --ascii` 输出边框对齐（不再“右边框被顶出去”）

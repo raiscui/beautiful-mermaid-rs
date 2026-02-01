@@ -25,3 +25,9 @@
   - 每行 `trimEnd()`（去掉行尾空格）
   - 去掉首尾空行
 - 参考实现见：`/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/__tests__/ascii.test.ts`
+
+## 2026-02-01 20:38 - 仓库贡献者指南（AGENTS.md）需要覆盖的信息
+
+- 结构事实：`src/`（lib+cli）、`tests/`（golden+smoke）、`vendor/`（JS bundle）、`docs/`（补充文档）。
+- 构建/安装：`cargo build/test/run` + `make release/install`（`INSTALL_DIR` 可通过命令行覆盖）。
+- Git 约定：当前仓库只有一条提交记录，风格是 `type: summary`（例：`init: bootstrap ...`）。
