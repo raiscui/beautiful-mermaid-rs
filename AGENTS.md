@@ -20,7 +20,8 @@
 - `printf 'graph LR\nA --> B\n' | cargo run --quiet`: run CLI (SVG to stdout).
 - `printf ... | cargo run --quiet -- --ascii [--use-ascii]`: ASCII/Unicode output.
 - `make release`: `cargo build --release`.
-- `make install INSTALL_DIR=/path/to/bin`: install `target/release/beautiful-mermaid-rs`.
+- `make install INSTALL_DIR=/path/to/bin`: sync bundle + `cargo test` + `cargo build --release` + install `target/release/beautiful-mermaid-rs`.
+  - Override TS repo path via `TS_REPO_DIR=/path/to/beautiful-mermaid`.
 - `make sync-vendor`: rebuild upstream TS bundle and copy into `vendor/` (skips Rust tests).
 - `make sync-vendor-verify`: sync bundle + run `cargo test` (recommended).
   - Override TS repo path via `TS_REPO_DIR=/path/to/beautiful-mermaid`.

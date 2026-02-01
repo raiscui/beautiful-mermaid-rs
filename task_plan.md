@@ -46,6 +46,7 @@
 - 已补齐 CLI 的自说明能力：支持 `--help/-h`、`--version/-V`，并且在 stdin 为空时给出明确提示。
 - 已新增 code agent 专用 CLI 说明：`docs/code-agent-cli.md`。
 - 已同步 README 的 CLI 示例为 `beautiful-mermaid-rs ...`。
+- 已将 `make sync-vendor-verify` 的动作集成进 `make install`：install 前固定同步 bundle 并做端到端验证。
 
 ## 进展日志
 
@@ -115,3 +116,20 @@
 - 验证：
   - `cargo test` 通过
   - `printf 'graph TD\\n开始 --> 结束\\n' | cargo run --quiet -- --ascii` 输出边框对齐（不再“右边框被顶出去”）
+
+### 2026-02-02 00:46
+- 新需求：把 `make sync-vendor-verify` 的动作集成进 `make install`。
+  - 动机：安装是“交付给其他项目/脚本使用”的关键动作。
+  - 如果 install 前忘了同步 vendor bundle，或没跑测试，问题会在更晚的地方爆炸，排查成本更高。
+- 可选方案（这里先记录两条路，避免以后反复改来改去）：
+  1. **严格模式（默认）**：`make install` 先执行 `sync-vendor-verify`（同步 bundle + `cargo test`），再 build release 并拷贝安装。
+     - 优点：最稳，install 永远是“可用且已验证”的产物。
+     - 缺点：install 变慢，且依赖 `bun` + TS 仓库存在。
+  2. **可选开关模式**：`make install` 默认执行 `sync-vendor-verify`，但允许 `SKIP_VENDOR_VERIFY=1` 跳过（用于临时快装）。
+     - 优点：兼顾速度与严谨。
+     - 缺点：接口更多，容易被滥用导致“又回到忘记验证”的老问题。
+- 决定：先落地方案 1（严格模式），把确定性打满；如果你后续明确需要“快装”，再补方案 2 的开关。
+- 计划：
+  - [x] 调整 Makefile：让 `install` 先跑 `sync-vendor-verify`，再跑 `release`
+  - [x] 本地验证：跑一遍 `make install INSTALL_DIR=...`，确认顺序与失败行为正确
+  - [x] 记录产出：同步更新 `WORKLOG.md`

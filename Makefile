@@ -18,7 +18,14 @@ release:
 	cargo build --release
 
 # 安装到指定目录
-install: release
+#
+# 说明：
+# - `beautiful-mermaid-rs` 的运行时逻辑依赖 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+# - 如果只 build/install 而忘了同步 TS bundle，安装出去的二进制可能在逻辑上“落后于上游”
+# - 因此这里让 `install` 固定先跑一次 `sync-vendor-verify`（同步 bundle + cargo test），再做 release 构建与安装
+install:
+	@$(MAKE) sync-vendor-verify
+	@$(MAKE) release
 	@echo "正在安装 $(BINARY_NAME) 到 $(INSTALL_DIR)..."
 	@mkdir -p $(INSTALL_DIR)
 	@cp $(RELEASE_DIR)/$(BINARY_NAME) $(INSTALL_DIR)/

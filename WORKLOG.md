@@ -67,3 +67,8 @@
 - 验证：
   - `cargo test` ✅
   - `graph TD\\n开始 --> 结束\\n` 的 ASCII 输出边框对齐 ✅
+
+## 2026-02-02 00:46 - 将 `sync-vendor-verify` 集成进 `make install`
+
+- 改良 `Makefile`：`make install` 先执行 `make sync-vendor-verify`（同步上游 TS bundle + `cargo test`），再做 `cargo build --release` 并安装到 `INSTALL_DIR`
+- 验证：`make install INSTALL_DIR=/tmp/beautiful-mermaid-rs-install` 执行成功（tsup build + Rust tests + release build + copy）
