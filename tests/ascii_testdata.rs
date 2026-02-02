@@ -7,6 +7,9 @@
 //   - 分隔符：一行 `---`
 //   - 后半部分：期望的 ASCII/Unicode 输出
 // - 本测试会逐个读取文件并做“严格输出对比”（只忽略末尾换行差异）
+// - 额外支持黄金文件更新模式：
+//   - 当设置环境变量 `UPDATE_GOLDEN=1` 时，不做 assert，而是把当前渲染输出写回 testdata 文件
+//   - 更新完成后会 panic 提示你重新运行测试（确保输出稳定且无其他回归）
 // ============================================================================
 
 use beautiful_mermaid_rs::{AsciiRenderOptions, render_mermaid_ascii};
@@ -32,6 +35,42 @@ fn normalize_whitespace(text: &str) -> String {
     }
 
     lines.join("\n")
+}
+
+/// 是否启用“自动更新 golden 文件”模式。
+///
+/// - `UPDATE_GOLDEN=1`：启用
+/// - 其他值/未设置：关闭
+fn should_update_golden() -> bool {
+    std::env::var("UPDATE_GOLDEN")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+/// 用新的期望输出重写 golden 文件内容（保留 Mermaid 区块与分隔符 `---`）。
+fn rewrite_golden_file_content(raw: &str, new_expected: &str) -> String {
+    let raw = raw.replace("\r\n", "\n");
+
+    let mut out = String::new();
+    let mut found_delimiter = false;
+
+    for line in raw.split('\n') {
+        out.push_str(line);
+        out.push('\n');
+
+        if line == "---" {
+            found_delimiter = true;
+            break;
+        }
+    }
+
+    if !found_delimiter {
+        panic!("golden 文件缺少分隔符 `---`，无法更新");
+    }
+
+    out.push_str(new_expected);
+    out.push('\n');
+
+    out
 }
 
 fn collect_txt_files(dir: &Path) -> Vec<PathBuf> {
@@ -139,6 +178,9 @@ fn parse_test_case(content: &str, use_ascii: bool) -> (String, AsciiRenderOption
 }
 
 fn run_testdata_dir(dir: &Path, use_ascii: bool) {
+    let update_golden = should_update_golden();
+    let mut updated_files: Vec<PathBuf> = Vec::new();
+
     for file_path in collect_txt_files(dir) {
         let raw = fs::read_to_string(&file_path)
             .unwrap_or_else(|err| panic!("读取 testdata 失败: path={file_path:?}, err={err}"));
@@ -152,10 +194,32 @@ fn run_testdata_dir(dir: &Path, use_ascii: bool) {
         let normalized_expected = normalize_whitespace(&expected);
         let normalized_actual = normalize_whitespace(&actual);
 
-        assert_eq!(
-            normalized_actual, normalized_expected,
-            "输出不一致: path={file_path:?} (dir={dir:?})"
+        if normalized_actual != normalized_expected {
+            if update_golden {
+                let new_content = rewrite_golden_file_content(&raw, &normalized_actual);
+                fs::write(&file_path, new_content).unwrap_or_else(|err| {
+                    panic!("写入 golden 失败: path={file_path:?}, err={err}");
+                });
+                updated_files.push(file_path);
+                continue;
+            }
+
+            assert_eq!(
+                normalized_actual, normalized_expected,
+                "输出不一致: path={file_path:?} (dir={dir:?})"
+            );
+        }
+    }
+
+    if update_golden && !updated_files.is_empty() {
+        let mut message = format!(
+            "已更新 {} 个 golden 文件（dir={dir:?}）。请重新运行测试确认输出稳定：\n",
+            updated_files.len()
         );
+        for path in updated_files {
+            message.push_str(&format!("  - {path:?}\n"));
+        }
+        panic!("{message}");
     }
 }
 

@@ -8,6 +8,7 @@
 
 mod error;
 mod js;
+mod native_pathfinder;
 pub mod theme;
 pub mod types;
 

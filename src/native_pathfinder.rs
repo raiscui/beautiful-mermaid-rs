@@ -1,0 +1,748 @@
+// ============================================================================
+// Native pathfinder (Rust) — CLI 性能加速专用
+//
+// 背景：
+// - `beautiful-mermaid-rs` 在 CLI 场景下使用 QuickJS（无 JIT）执行 TS bundle。
+// - 对于 Flowchart/State 的 ASCII/Unicode 渲染，瓶颈主要在 A* 路由：
+//   - heap pop + 4 邻居扩展的热循环在解释器里非常慢（秒级甚至十几秒）。
+//
+// 目标：
+// - 把 A* 的热循环挪到 Rust（release 编译优化）执行，
+//   并通过 rquickjs 注入全局函数供 JS 侧调用：
+//   - `globalThis.__bm_getPath(...)`
+//   - `globalThis.__bm_getPathStrict(...)`
+//
+// 设计原则：
+// - 输出必须与原 JS 实现一致（Rust 仓库已有 golden tests 覆盖）
+// - 避免 unsafe：TypedArray 通过 `AsRef<[T]>` 只读访问即可
+// - 复用大数组：用 stamp 技巧避免每次 search 清空整张 cost 表
+// ============================================================================
+
+/// heap（最小堆）节点：保存 idx/priority/cost 三个字段。
+///
+/// 说明：
+/// - 这里刻意不用 `BinaryHeap<Reverse<_>>`：
+///   - 需要包装类型与比较，开销更高
+///   - 不利于完全复刻 JS 的“严格 < 比较” tie-break 行为
+#[derive(Default)]
+struct MinHeap {
+    idxs: Vec<u32>,
+    priorities: Vec<u32>,
+    costs: Vec<u32>,
+}
+
+impl MinHeap {
+    fn clear(&mut self) {
+        self.idxs.clear();
+        self.priorities.clear();
+        self.costs.clear();
+    }
+
+    fn push(&mut self, idx: u32, priority: u32, cost: u32) {
+        self.idxs.push(idx);
+        self.priorities.push(priority);
+        self.costs.push(cost);
+        self.bubble_up(self.idxs.len() - 1);
+    }
+
+    fn pop(&mut self) -> Option<(u32, u32)> {
+        if self.idxs.is_empty() {
+            return None;
+        }
+
+        let out_idx = self.idxs[0];
+        let out_cost = self.costs[0];
+
+        let last_idx = self.idxs.pop().unwrap();
+        let last_priority = self.priorities.pop().unwrap();
+        let last_cost = self.costs.pop().unwrap();
+
+        if !self.idxs.is_empty() {
+            self.idxs[0] = last_idx;
+            self.priorities[0] = last_priority;
+            self.costs[0] = last_cost;
+            self.sink_down(0);
+        }
+
+        Some((out_idx, out_cost))
+    }
+
+    fn bubble_up(&mut self, mut i: usize) {
+        while i > 0 {
+            let parent = (i - 1) >> 1;
+            // 只在严格更小（<）时交换，保持 tie-break 行为与 JS 一致
+            if self.priorities[i] < self.priorities[parent] {
+                self.idxs.swap(i, parent);
+                self.priorities.swap(i, parent);
+                self.costs.swap(i, parent);
+                i = parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn sink_down(&mut self, mut i: usize) {
+        let n = self.idxs.len();
+        loop {
+            let mut smallest = i;
+            let left = 2 * i + 1;
+            let right = 2 * i + 2;
+
+            if left < n && self.priorities[left] < self.priorities[smallest] {
+                smallest = left;
+            }
+            if right < n && self.priorities[right] < self.priorities[smallest] {
+                smallest = right;
+            }
+
+            if smallest != i {
+                self.idxs.swap(i, smallest);
+                self.priorities.swap(i, smallest);
+                self.costs.swap(i, smallest);
+                i = smallest;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+// `UsedPointSet` 里使用的方向 bit（与 TS 侧保持一致）
+const CONNECT_LEFT: u8 = 1 << 0;
+const CONNECT_RIGHT: u8 = 1 << 1;
+const CONNECT_UP: u8 = 1 << 2;
+const CONNECT_DOWN: u8 = 1 << 3;
+const H_MASK: u8 = CONNECT_LEFT | CONNECT_RIGHT;
+const V_MASK: u8 = CONNECT_UP | CONNECT_DOWN;
+
+/// Rust 侧复用的 A* 缓存（对应 TS 的 AStarContext，但不持有 blocked/usage 输入）。
+#[derive(Default)]
+pub struct NativeAStar {
+    stamp: u32,
+    cost_stamp: Vec<u32>,
+    cost_so_far: Vec<u32>,
+    came_from: Vec<i32>,
+    heap: MinHeap,
+}
+
+impl NativeAStar {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 保证内部缓冲区容量足够容纳 `stride * height` 的网格。
+    fn ensure_capacity(&mut self, stride: usize, height: usize) {
+        let needed = stride.saturating_mul(height);
+        if needed == 0 {
+            self.heap.clear();
+            return;
+        }
+
+        if self.cost_stamp.len() < needed {
+            self.cost_stamp.resize(needed, 0);
+            self.cost_so_far.resize(needed, 0);
+            self.came_from.resize(needed, -1);
+        }
+    }
+
+    /// stamp 递增；溢出后把整张 stamp 表清零（保持正确性）。
+    fn next_stamp(&mut self) -> u32 {
+        self.stamp = self.stamp.wrapping_add(1);
+        if self.stamp == 0 {
+            // 0 作为“未使用”保留；溢出后统一清零避免碰撞
+            self.cost_stamp.fill(0);
+            self.stamp = 1;
+        }
+        self.stamp
+    }
+
+    /// 非 strict：只考虑 blocked + bounds。
+    pub fn get_path(
+        &mut self,
+        stride: usize,
+        height: usize,
+        from_idx: u32,
+        to_idx: u32,
+        max_x: u32,
+        max_y: u32,
+        blocked: &[u8],
+    ) -> Result<Option<Vec<u32>>, String> {
+        self.ensure_capacity(stride, height);
+        let cell_count = stride.saturating_mul(height);
+
+        if cell_count == 0 {
+            return Ok(None);
+        }
+        if blocked.len() < cell_count {
+            return Err(format!(
+                "blocked 长度不足: blocked.len={} < cell_count={cell_count}",
+                blocked.len()
+            ));
+        }
+
+        let from = from_idx as usize;
+        let to = to_idx as usize;
+        if from >= cell_count || to >= cell_count {
+            return Ok(None);
+        }
+
+        if max_x as usize >= stride || max_y as usize >= height {
+            return Err(format!(
+                "bounds 越界: max_x={max_x}, max_y={max_y}, stride={stride}, height={height}"
+            ));
+        }
+
+        let stamp = self.next_stamp();
+        self.heap.clear();
+
+        self.cost_stamp[from] = stamp;
+        self.cost_so_far[from] = 0;
+        self.came_from[from] = -1;
+        self.heap.push(from_idx, 0, 0);
+
+        let to_y = to / stride;
+        let to_x = to - to_y * stride;
+
+        while let Some((current_idx_u32, current_cost_at_push)) = self.heap.pop() {
+            let current = current_idx_u32 as usize;
+
+            // 旧的堆项（被更优路径覆盖）直接跳过，避免重复扩展
+            if self.cost_stamp[current] != stamp {
+                continue;
+            }
+            if current_cost_at_push != self.cost_so_far[current] {
+                continue;
+            }
+
+            if current == to {
+                return Ok(Some(self.reconstruct_path(current_idx_u32)));
+            }
+
+            let current_cost = self.cost_so_far[current];
+            let current_y = current / stride;
+            let current_x = current - current_y * stride;
+
+            // 右
+            if current_x < max_x as usize {
+                let next = current + 1;
+                if blocked[next] == 0 || next == to {
+                    let new_cost = current_cost + 1;
+                    if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                        self.cost_stamp[next] = stamp;
+                        self.cost_so_far[next] = new_cost;
+                        self.came_from[next] = current_idx_u32 as i32;
+
+                        let next_x = current_x + 1;
+                        let abs_x = if next_x >= to_x {
+                            next_x - to_x
+                        } else {
+                            to_x - next_x
+                        };
+                        let abs_y = if current_y >= to_y {
+                            current_y - to_y
+                        } else {
+                            to_y - current_y
+                        };
+                        let h = abs_x as u32
+                            + abs_y as u32
+                            + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                        self.heap.push(next as u32, new_cost + h, new_cost);
+                    }
+                }
+            }
+
+            // 左
+            if current_x > 0 {
+                let next = current - 1;
+                if blocked[next] == 0 || next == to {
+                    let new_cost = current_cost + 1;
+                    if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                        self.cost_stamp[next] = stamp;
+                        self.cost_so_far[next] = new_cost;
+                        self.came_from[next] = current_idx_u32 as i32;
+
+                        let next_x = current_x - 1;
+                        let abs_x = if next_x >= to_x {
+                            next_x - to_x
+                        } else {
+                            to_x - next_x
+                        };
+                        let abs_y = if current_y >= to_y {
+                            current_y - to_y
+                        } else {
+                            to_y - current_y
+                        };
+                        let h = abs_x as u32
+                            + abs_y as u32
+                            + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                        self.heap.push(next as u32, new_cost + h, new_cost);
+                    }
+                }
+            }
+
+            // 下
+            if current_y < max_y as usize {
+                let next = current + stride;
+                if blocked[next] == 0 || next == to {
+                    let new_cost = current_cost + 1;
+                    if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                        self.cost_stamp[next] = stamp;
+                        self.cost_so_far[next] = new_cost;
+                        self.came_from[next] = current_idx_u32 as i32;
+
+                        let next_y = current_y + 1;
+                        let abs_x = if current_x >= to_x {
+                            current_x - to_x
+                        } else {
+                            to_x - current_x
+                        };
+                        let abs_y = if next_y >= to_y {
+                            next_y - to_y
+                        } else {
+                            to_y - next_y
+                        };
+                        let h = abs_x as u32
+                            + abs_y as u32
+                            + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                        self.heap.push(next as u32, new_cost + h, new_cost);
+                    }
+                }
+            }
+
+            // 上
+            if current_y > 0 {
+                let next = current - stride;
+                if blocked[next] == 0 || next == to {
+                    let new_cost = current_cost + 1;
+                    if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                        self.cost_stamp[next] = stamp;
+                        self.cost_so_far[next] = new_cost;
+                        self.came_from[next] = current_idx_u32 as i32;
+
+                        let next_y = current_y - 1;
+                        let abs_x = if current_x >= to_x {
+                            current_x - to_x
+                        } else {
+                            to_x - current_x
+                        };
+                        let abs_y = if next_y >= to_y {
+                            next_y - to_y
+                        } else {
+                            to_y - next_y
+                        };
+                        let h = abs_x as u32
+                            + abs_y as u32
+                            + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                        self.heap.push(next as u32, new_cost + h, new_cost);
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// strict：额外考虑 UsedPointSet（禁止 `┼` 四向交叉）+ SegmentUsage（共线共享规则）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_path_strict(
+        &mut self,
+        stride: usize,
+        height: usize,
+        from_idx: u32,
+        to_idx: u32,
+        max_x: u32,
+        max_y: u32,
+        blocked: &[u8],
+        segment_used: &[u8],
+        used_as_middle: &[u8],
+        start_source: &[u32],
+        start_source_multi: &[u8],
+        end_target: &[u32],
+        end_target_multi: &[u8],
+        used_points: Option<&[u8]>,
+        route_from_idx: u32,
+        route_to_idx: u32,
+        edge_from_id: u32,
+        edge_to_id: u32,
+    ) -> Result<Option<Vec<u32>>, String> {
+        self.ensure_capacity(stride, height);
+        let cell_count = stride.saturating_mul(height);
+
+        if cell_count == 0 {
+            return Ok(None);
+        }
+        if blocked.len() < cell_count {
+            return Err(format!(
+                "blocked 长度不足: blocked.len={} < cell_count={cell_count}",
+                blocked.len()
+            ));
+        }
+
+        let seg_count = cell_count.saturating_mul(2);
+        if segment_used.len() < seg_count
+            || used_as_middle.len() < seg_count
+            || start_source.len() < seg_count
+            || start_source_multi.len() < seg_count
+            || end_target.len() < seg_count
+            || end_target_multi.len() < seg_count
+        {
+            return Err(format!(
+                "segmentUsage 长度不足: seg_count={seg_count}, segment_used={}, used_as_middle={}, start_source={}, start_source_multi={}, end_target={}, end_target_multi={}",
+                segment_used.len(),
+                used_as_middle.len(),
+                start_source.len(),
+                start_source_multi.len(),
+                end_target.len(),
+                end_target_multi.len(),
+            ));
+        }
+
+        if let Some(points) = used_points {
+            if points.len() < cell_count {
+                return Err(format!(
+                    "usedPoints 长度不足: used_points.len={} < cell_count={cell_count}",
+                    points.len()
+                ));
+            }
+        }
+
+        let from = from_idx as usize;
+        let to = to_idx as usize;
+        if from >= cell_count || to >= cell_count {
+            return Ok(None);
+        }
+
+        if max_x as usize >= stride || max_y as usize >= height {
+            return Err(format!(
+                "bounds 越界: max_x={max_x}, max_y={max_y}, stride={stride}, height={height}"
+            ));
+        }
+
+        let stamp = self.next_stamp();
+        self.heap.clear();
+
+        self.cost_stamp[from] = stamp;
+        self.cost_so_far[from] = 0;
+        self.came_from[from] = -1;
+        self.heap.push(from_idx, 0, 0);
+
+        let to_y = to / stride;
+        let to_x = to - to_y * stride;
+
+        while let Some((current_idx_u32, current_cost_at_push)) = self.heap.pop() {
+            let current = current_idx_u32 as usize;
+
+            if self.cost_stamp[current] != stamp {
+                continue;
+            }
+            if current_cost_at_push != self.cost_so_far[current] {
+                continue;
+            }
+
+            if current == to {
+                return Ok(Some(self.reconstruct_path(current_idx_u32)));
+            }
+
+            let current_cost = self.cost_so_far[current];
+            let current_y = current / stride;
+            let current_x = current - current_y * stride;
+
+            // -----------------------------------------------------------------
+            // 4 邻居扩展（顺序与 JS 保持一致：右/左/下/上）
+            // -----------------------------------------------------------------
+
+            // 右
+            if current_x < max_x as usize {
+                let next = current + 1;
+                if blocked[next] == 0 || next == to {
+                    if is_step_allowed_strict(
+                        current,
+                        next,
+                        /*seg_key=*/ current * 2,
+                        CONNECT_RIGHT,
+                        CONNECT_LEFT,
+                        segment_used,
+                        used_as_middle,
+                        start_source,
+                        start_source_multi,
+                        end_target,
+                        end_target_multi,
+                        used_points,
+                        route_from_idx,
+                        route_to_idx,
+                        edge_from_id,
+                        edge_to_id,
+                    ) {
+                        let new_cost = current_cost + 1;
+                        if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                            self.cost_stamp[next] = stamp;
+                            self.cost_so_far[next] = new_cost;
+                            self.came_from[next] = current_idx_u32 as i32;
+
+                            let next_x = current_x + 1;
+                            let abs_x = if next_x >= to_x {
+                                next_x - to_x
+                            } else {
+                                to_x - next_x
+                            };
+                            let abs_y = if current_y >= to_y {
+                                current_y - to_y
+                            } else {
+                                to_y - current_y
+                            };
+                            let h = abs_x as u32
+                                + abs_y as u32
+                                + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                            self.heap.push(next as u32, new_cost + h, new_cost);
+                        }
+                    }
+                }
+            }
+
+            // 左
+            if current_x > 0 {
+                let next = current - 1;
+                if blocked[next] == 0 || next == to {
+                    if is_step_allowed_strict(
+                        current,
+                        next,
+                        /*seg_key=*/ next * 2,
+                        CONNECT_LEFT,
+                        CONNECT_RIGHT,
+                        segment_used,
+                        used_as_middle,
+                        start_source,
+                        start_source_multi,
+                        end_target,
+                        end_target_multi,
+                        used_points,
+                        route_from_idx,
+                        route_to_idx,
+                        edge_from_id,
+                        edge_to_id,
+                    ) {
+                        let new_cost = current_cost + 1;
+                        if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                            self.cost_stamp[next] = stamp;
+                            self.cost_so_far[next] = new_cost;
+                            self.came_from[next] = current_idx_u32 as i32;
+
+                            let next_x = current_x - 1;
+                            let abs_x = if next_x >= to_x {
+                                next_x - to_x
+                            } else {
+                                to_x - next_x
+                            };
+                            let abs_y = if current_y >= to_y {
+                                current_y - to_y
+                            } else {
+                                to_y - current_y
+                            };
+                            let h = abs_x as u32
+                                + abs_y as u32
+                                + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                            self.heap.push(next as u32, new_cost + h, new_cost);
+                        }
+                    }
+                }
+            }
+
+            // 下
+            if current_y < max_y as usize {
+                let next = current + stride;
+                if blocked[next] == 0 || next == to {
+                    if is_step_allowed_strict(
+                        current,
+                        next,
+                        /*seg_key=*/ current * 2 + 1,
+                        CONNECT_DOWN,
+                        CONNECT_UP,
+                        segment_used,
+                        used_as_middle,
+                        start_source,
+                        start_source_multi,
+                        end_target,
+                        end_target_multi,
+                        used_points,
+                        route_from_idx,
+                        route_to_idx,
+                        edge_from_id,
+                        edge_to_id,
+                    ) {
+                        let new_cost = current_cost + 1;
+                        if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                            self.cost_stamp[next] = stamp;
+                            self.cost_so_far[next] = new_cost;
+                            self.came_from[next] = current_idx_u32 as i32;
+
+                            let next_y = current_y + 1;
+                            let abs_x = if current_x >= to_x {
+                                current_x - to_x
+                            } else {
+                                to_x - current_x
+                            };
+                            let abs_y = if next_y >= to_y {
+                                next_y - to_y
+                            } else {
+                                to_y - next_y
+                            };
+                            let h = abs_x as u32
+                                + abs_y as u32
+                                + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                            self.heap.push(next as u32, new_cost + h, new_cost);
+                        }
+                    }
+                }
+            }
+
+            // 上
+            if current_y > 0 {
+                let next = current - stride;
+                if blocked[next] == 0 || next == to {
+                    if is_step_allowed_strict(
+                        current,
+                        next,
+                        /*seg_key=*/ next * 2 + 1,
+                        CONNECT_UP,
+                        CONNECT_DOWN,
+                        segment_used,
+                        used_as_middle,
+                        start_source,
+                        start_source_multi,
+                        end_target,
+                        end_target_multi,
+                        used_points,
+                        route_from_idx,
+                        route_to_idx,
+                        edge_from_id,
+                        edge_to_id,
+                    ) {
+                        let new_cost = current_cost + 1;
+                        if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                            self.cost_stamp[next] = stamp;
+                            self.cost_so_far[next] = new_cost;
+                            self.came_from[next] = current_idx_u32 as i32;
+
+                            let next_y = current_y - 1;
+                            let abs_x = if current_x >= to_x {
+                                current_x - to_x
+                            } else {
+                                to_x - current_x
+                            };
+                            let abs_y = if next_y >= to_y {
+                                next_y - to_y
+                            } else {
+                                to_y - next_y
+                            };
+                            let h = abs_x as u32
+                                + abs_y as u32
+                                + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                            self.heap.push(next as u32, new_cost + h, new_cost);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// 回溯路径（包含 fromIdx 与 toIdx），与 TS 行为一致。
+    fn reconstruct_path(&self, mut current_idx: u32) -> Vec<u32> {
+        let mut path: Vec<u32> = Vec::new();
+        loop {
+            path.push(current_idx);
+            let parent = self.came_from[current_idx as usize];
+            if parent < 0 {
+                break;
+            }
+            current_idx = parent as u32;
+        }
+        path.reverse();
+        path
+    }
+}
+
+/// strict 约束判定（单步）。
+///
+/// 说明：
+/// - 这里用 free cell 的 UsedPointSet 禁止形成 `┼`（四向交叉）
+/// - 并用 SegmentUsage 禁止“不同 source/target 的边复用同一段线”
+#[allow(clippy::too_many_arguments)]
+fn is_step_allowed_strict(
+    step_from: usize,
+    step_to: usize,
+    seg_key: usize,
+    from_bit: u8,
+    to_bit: u8,
+    segment_used: &[u8],
+    used_as_middle: &[u8],
+    start_source: &[u32],
+    start_source_multi: &[u8],
+    end_target: &[u32],
+    end_target_multi: &[u8],
+    used_points: Option<&[u8]>,
+    route_from_idx: u32,
+    route_to_idx: u32,
+    edge_from_id: u32,
+    edge_to_id: u32,
+) -> bool {
+    // 1) usedPoints：禁止形成 `┼` 四向交叉
+    if let Some(points) = used_points {
+        let from_mask = points[step_from];
+        if from_mask != 0 {
+            let next_mask = from_mask | from_bit;
+            if (next_mask & H_MASK) == H_MASK && (next_mask & V_MASK) == V_MASK {
+                return false;
+            }
+        }
+        let to_mask = points[step_to];
+        if to_mask != 0 {
+            let next_mask = to_mask | to_bit;
+            if (next_mask & H_MASK) == H_MASK && (next_mask & V_MASK) == V_MASK {
+                return false;
+            }
+        }
+    }
+
+    // 2) segmentUsage：严格共线共享规则
+    if segment_used[seg_key] == 0 {
+        return true;
+    }
+
+    // 一旦有边把这段当“中间段”用过，那么任何共享都会让语义变得更难读。
+    if used_as_middle[seg_key] != 0 {
+        return false;
+    }
+
+    let step_from_u32 = step_from as u32;
+    let step_to_u32 = step_to as u32;
+    let is_start_step = step_from_u32 == route_from_idx;
+    let is_end_step = step_to_u32 == route_to_idx;
+
+    let ss = start_source[seg_key];
+    let et = end_target[seg_key];
+    let ss_multi = start_source_multi[seg_key] != 0;
+    let et_multi = end_target_multi[seg_key] != 0;
+
+    // 特殊情况：from 与 to 紧挨着时，这一段既是起点段也是终点段。
+    // 只允许“同源 + 同靶”的边共享它（例如多条平行边）。
+    if is_start_step && is_end_step {
+        let start_ok = !ss_multi && (ss == 0 || ss == edge_from_id);
+        let end_ok = !et_multi && (et == 0 || et == edge_to_id);
+        return start_ok && end_ok;
+    }
+
+    // 同源：只允许“起点段”共线，并且该段不能混入终点共享
+    if is_start_step {
+        return !et_multi && et == 0 && !ss_multi && ss == edge_from_id;
+    }
+
+    // 同靶：只允许“终点段”共线，并且该段不能混入起点共享
+    if is_end_step {
+        return !ss_multi && ss == 0 && !et_multi && et == edge_to_id;
+    }
+
+    false
+}

@@ -10,9 +10,13 @@
 // ============================================================================
 
 use crate::error::{BeautifulMermaidError, Result};
+use crate::native_pathfinder::NativeAStar;
 use crate::types::{AsciiRenderOptions, RenderOptions};
 use once_cell::unsync::OnceCell;
-use rquickjs::{Context, Function, Object, Promise, Runtime};
+use rquickjs::function::{FromParams, IntoJsFunc, ParamRequirement, Params};
+use rquickjs::{Context, Function, IntoJs, Object, Promise, Runtime, TypedArray, Value};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// 通过 `include_str!` 内嵌的 browser IIFE bundle（来自 TS 项目的 tsup 输出）。
 const BEAUTIFUL_MERMAID_BUNDLE: &str =
@@ -39,10 +43,202 @@ pub struct JsEngine {
     context: Context,
 }
 
+// ============================================================================
+// Native pathfinder -> JS glue
+//
+// 说明：
+// - rquickjs 的 `Function::new` 要求传入的类型实现 `IntoJsFunc<'js, P>`。
+// - 对于带 `'js` 生命周期的参数（例如 `TypedArray<'js, u8>` / `Object<'js>`），
+//   直接写闭包很容易陷入生命周期推断问题。
+// - 因此这里用“小结构体 + 手写 IntoJsFunc”来稳定地把 native A* 暴露给 JS。
+// ============================================================================
+
+#[derive(Clone)]
+struct NativeGetPathFn {
+    astar: Rc<RefCell<NativeAStar>>,
+}
+
+impl<'js> IntoJsFunc<'js, (u32, u32, u32, u32, u32, TypedArray<'js, u8>)> for NativeGetPathFn {
+    fn param_requirements() -> ParamRequirement {
+        <(u32, u32, u32, u32, u32, TypedArray<'js, u8>)>::param_requirements()
+    }
+
+    fn call<'a>(&self, params: Params<'a, 'js>) -> rquickjs::Result<Value<'js>> {
+        let ctx = params.ctx().clone();
+        let (stride, from_idx, to_idx, max_x, max_y, blocked) =
+            <(u32, u32, u32, u32, u32, TypedArray<'js, u8>)>::from_params(&mut params.access())?;
+
+        let stride_usize = stride as usize;
+        if stride_usize == 0 {
+            return Err(rquickjs::Error::new_from_js_message(
+                "native_pathfinder",
+                "getPath",
+                "stride 不能为 0",
+            ));
+        }
+
+        let blocked_slice: &[u8] = blocked.as_ref();
+        if blocked_slice.len() % stride_usize != 0 {
+            return Err(rquickjs::Error::new_from_js_message(
+                "native_pathfinder",
+                "getPath",
+                format!(
+                    "blocked.len() 必须能被 stride 整除: blocked.len()={}, stride={stride}",
+                    blocked_slice.len()
+                ),
+            ));
+        }
+        let height_usize = blocked_slice.len() / stride_usize;
+
+        let path = self
+            .astar
+            .borrow_mut()
+            .get_path(
+                stride_usize,
+                height_usize,
+                from_idx,
+                to_idx,
+                max_x,
+                max_y,
+                blocked_slice,
+            )
+            .map_err(|message| {
+                rquickjs::Error::new_from_js_message("native_pathfinder", "getPath", message)
+            })?;
+
+        match path {
+            Some(path) => path.into_js(&ctx),
+            None => Ok(Value::new_null(ctx)),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct NativeGetPathStrictFn {
+    astar: Rc<RefCell<NativeAStar>>,
+}
+
+impl<'js> IntoJsFunc<'js, (u32, u32, u32, u32, u32, TypedArray<'js, u8>, Object<'js>)>
+    for NativeGetPathStrictFn
+{
+    fn param_requirements() -> ParamRequirement {
+        <(u32, u32, u32, u32, u32, TypedArray<'js, u8>, Object<'js>)>::param_requirements()
+    }
+
+    fn call<'a>(&self, params: Params<'a, 'js>) -> rquickjs::Result<Value<'js>> {
+        let ctx = params.ctx().clone();
+        let (stride, from_idx, to_idx, max_x, max_y, blocked, constraints) =
+            <(u32, u32, u32, u32, u32, TypedArray<'js, u8>, Object<'js>)>::from_params(
+                &mut params.access(),
+            )?;
+
+        let stride_usize = stride as usize;
+        if stride_usize == 0 {
+            return Err(rquickjs::Error::new_from_js_message(
+                "native_pathfinder",
+                "getPathStrict",
+                "stride 不能为 0",
+            ));
+        }
+
+        let blocked_slice: &[u8] = blocked.as_ref();
+        if blocked_slice.len() % stride_usize != 0 {
+            return Err(rquickjs::Error::new_from_js_message(
+                "native_pathfinder",
+                "getPathStrict",
+                format!(
+                    "blocked.len() 必须能被 stride 整除: blocked.len()={}, stride={stride}",
+                    blocked_slice.len()
+                ),
+            ));
+        }
+        let height_usize = blocked_slice.len() / stride_usize;
+
+        // constraints: StrictPathConstraints（TS 侧对象）
+        let segment_usage: Object<'js> = constraints.get("segmentUsage")?;
+
+        let segment_used: TypedArray<'js, u8> = segment_usage.get("segmentUsed")?;
+        let used_as_middle: TypedArray<'js, u8> = segment_usage.get("usedAsMiddle")?;
+        let start_source: TypedArray<'js, u32> = segment_usage.get("startSource")?;
+        let start_source_multi: TypedArray<'js, u8> = segment_usage.get("startSourceMulti")?;
+        let end_target: TypedArray<'js, u32> = segment_usage.get("endTarget")?;
+        let end_target_multi: TypedArray<'js, u8> = segment_usage.get("endTargetMulti")?;
+
+        // usedPoints 在 TS 侧是可选字段：undefined/null 都视为 None
+        let used_points: Option<TypedArray<'js, u8>> = constraints.get("usedPoints")?;
+        let route_from_idx: u32 = constraints.get("routeFromIdx")?;
+        let route_to_idx: u32 = constraints.get("routeToIdx")?;
+        let edge_from_id: u32 = constraints.get("edgeFromId")?;
+        let edge_to_id: u32 = constraints.get("edgeToId")?;
+
+        let path = self
+            .astar
+            .borrow_mut()
+            .get_path_strict(
+                stride_usize,
+                height_usize,
+                from_idx,
+                to_idx,
+                max_x,
+                max_y,
+                blocked_slice,
+                segment_used.as_ref(),
+                used_as_middle.as_ref(),
+                start_source.as_ref(),
+                start_source_multi.as_ref(),
+                end_target.as_ref(),
+                end_target_multi.as_ref(),
+                used_points.as_ref().map(|p| p.as_ref()),
+                route_from_idx,
+                route_to_idx,
+                edge_from_id,
+                edge_to_id,
+            )
+            .map_err(|message| {
+                rquickjs::Error::new_from_js_message("native_pathfinder", "getPathStrict", message)
+            })?;
+
+        match path {
+            Some(path) => path.into_js(&ctx),
+            None => Ok(Value::new_null(ctx)),
+        }
+    }
+}
+
 impl JsEngine {
     fn new() -> Result<Self> {
         let runtime = Runtime::new()?;
         let context = Context::full(&runtime)?;
+
+        // ----------------------------------------------------------------
+        // CLI 加速：注册 native pathfinder
+        //
+        // 说明：
+        // - TS bundle 会在运行时检测 `globalThis.__bm_getPath*` 是否存在。
+        // - 存在则调用 native（Rust）实现的 A*，否则回退到纯 JS 版本。
+        //
+        // 设计要点：
+        // - native 侧维护一份可复用的 A* 缓存（stamp/heap/表），避免每次调用分配大数组
+        // - TypedArray 通过 `AsRef<[T]>` 只读访问，不需要 unsafe
+        // ----------------------------------------------------------------
+        context.with(|ctx| -> Result<()> {
+            let astar = Rc::new(RefCell::new(NativeAStar::new()));
+
+            let get_path = Function::new(
+                ctx.clone(),
+                NativeGetPathFn {
+                    astar: astar.clone(),
+                },
+            )?
+            .with_name("__bm_getPath")?;
+            ctx.globals().set("__bm_getPath", get_path)?;
+
+            let get_path_strict = Function::new(ctx.clone(), NativeGetPathStrictFn { astar })?
+                .with_name("__bm_getPathStrict")?;
+            ctx.globals().set("__bm_getPathStrict", get_path_strict)?;
+
+            Ok(())
+        })?;
 
         // ----------------------------------------------------------------
         // 初始化：把 browser IIFE bundle eval 进 Context

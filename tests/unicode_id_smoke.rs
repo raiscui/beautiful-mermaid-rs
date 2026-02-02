@@ -6,7 +6,9 @@
 // - 这是 Rust 侧的“端到端验证”：最终跑的是 vendor 的 JS bundle，而不是 TS 源码
 // ============================================================================
 
-use beautiful_mermaid_rs::{AsciiRenderOptions, RenderOptions, render_mermaid, render_mermaid_ascii};
+use beautiful_mermaid_rs::{
+    AsciiRenderOptions, RenderOptions, render_mermaid, render_mermaid_ascii,
+};
 
 // ============================================================================
 // 终端“显示宽度”（简化版 wcwidth）
@@ -76,8 +78,14 @@ fn svg_supports_unicode_node_ids() {
         !svg.contains("-Infinity"),
         "SVG 不应包含 -Infinity（这意味着布局计算失败）"
     );
-    assert!(svg.contains(">开始</text>"), "SVG 应渲染中文节点 label：开始");
-    assert!(svg.contains(">结束</text>"), "SVG 应渲染中文节点 label：结束");
+    assert!(
+        svg.contains(">开始</text>"),
+        "SVG 应渲染中文节点 label：开始"
+    );
+    assert!(
+        svg.contains(">结束</text>"),
+        "SVG 应渲染中文节点 label：结束"
+    );
 }
 
 #[test]

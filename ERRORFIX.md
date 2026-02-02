@@ -71,3 +71,47 @@
   - `cargo test` ✅
   - `graph TD\n开始 --> 结束\n` 的 ASCII/Unicode 输出边框对齐 ✅
   - Rust 回归测试 `tests/unicode_id_smoke.rs`：额外断言每一行“终端显示宽度”一致 ✅
+
+## 2026-02-02 16:25 - 同步 vendor bundle 后 golden tests 失败（参考输出过期）
+
+- 现象：
+  - 执行 `make install`（内部会跑 `make sync-vendor-verify`）时失败，报错集中在：
+    - `tests/ascii_testdata.rs`: `ascii_testdata_matches_reference` / `unicode_testdata_matches_reference`
+  - 失败文件（示例）：
+    - `tests/testdata/ascii/ampersand_lhs_and_rhs.txt`
+    - `tests/testdata/ascii/preserve_order_of_definition.txt`
+    - `tests/testdata/ascii/self_reference_with_edge.txt`
+    - 以及对应的 `tests/testdata/unicode/*.txt`
+- 原因：
+  - 这次同步了更新后的上游 TS bundle（`vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`）。
+  - 上游在“自环/多边合并”场景的布局/走线策略发生了变化，导致 ASCII/Unicode 渲染输出改变。
+  - 本仓库的 golden 文件仍然是旧输出，因此对比失败。
+- 修复：
+  - 更新上述 golden 文件里的期望输出，使其与最新 vendor bundle 对齐。
+- 验证：
+  - `cargo test` 全通过 ✅
+  - `make install` 端到端通过（tsup build → sync vendor → cargo test → release build → install）✅
+
+## 2026-02-02 21:24 - 上游 TS bundle 再次变更导致 golden 失败（并改良为可一键更新）
+
+- 现象：
+  - 你再次执行 `make install`（内部会跑 `sync-vendor-verify`）后失败。
+  - 这次同步到的新 vendor bundle sha256 为 `18ac06ce...`（产物体积也有增长）。
+  - mismatch 的用例包含（ASCII/Unicode 成对变化）：
+    - `ampersand_lhs_and_rhs`
+    - `cls_all_relationships`
+    - `er_identifying`
+    - `preserve_order_of_definition`
+    - `self_reference_with_edge`
+- 原因：
+  - golden 的本质是“锁定当前输出”，所以一旦上游 bundle 更新且布局/走线/label 排版有变化，就会触发对比失败。
+- 修复：
+  - 更新上述 `tests/testdata/{ascii,unicode}/*.txt` 的期望输出，使其与最新 vendor bundle 对齐。
+  - 改良 `tests/ascii_testdata.rs`：
+    - 增加 `UPDATE_GOLDEN=1` 模式，遇到 mismatch 自动写回 golden 文件，避免下次再手工逐个改。
+    - 写回后会 panic 提示“重新运行测试确认稳定”，防止 silent 更新掩盖问题。
+- 验证：
+  - `cargo test` 全通过 ✅
+  - `make install` 端到端通过（tsup build → sync vendor → cargo test → release build → install）✅
+- 额外观察（潜在风险）：
+  - `preserve_order_of_definition` 这类包含自环/循环边的案例在当前 bundle 下渲染变慢，导致 golden tests 整体耗时上升（本机观测 70-100s 级别）。

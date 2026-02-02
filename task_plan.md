@@ -133,3 +133,49 @@
   - [x] 调整 Makefile：让 `install` 先跑 `sync-vendor-verify`，再跑 `release`
   - [x] 本地验证：跑一遍 `make install INSTALL_DIR=...`，确认顺序与失败行为正确
   - [x] 记录产出：同步更新 `WORKLOG.md`
+
+### 2026-02-02 16:25
+- 现象：执行 `make install`（内部会跑 `sync-vendor-verify`）后，`tests/ascii_testdata.rs` 的 golden 输出对比失败。
+  - 失败用例集中在“自环/多边合并”的布局：`ampersand_lhs_and_rhs`、`preserve_order_of_definition`、`self_reference_with_edge`。
+- 判断：这是**上游 TS bundle 更新**导致 ASCII/Unicode 渲染布局有变化，属于“golden 参考输出过期”，不是 Rust 侧逻辑回退。
+- 计划：
+  - [x] 更新对应 golden files：让测试期望与最新 vendor bundle 对齐
+  - [x] 验证：`cargo test` 全通过
+  - [x] 验证：重新执行 `make install`，确认端到端（tsup build → sync vendor → cargo test → release install）完全恢复
+- 状态：
+  - 已完成：`make install` 端到端验证通过
+
+### 2026-02-02 21:06
+- 现象：你再次执行 `make install` 后，`tests/ascii_testdata.rs` 的 golden 输出对比再次失败。
+  - 本次只暴露了 `ampersand_lhs_and_rhs` 的差异（ASCII/Unicode 都变了）。
+  - 从输出看，上游 TS bundle 也确实变了（例如 IIFE 体积从 143.65KB 变到 147.29KB，sha256 变为 `18ac06ce...`）。
+- 两种处理路线（先摆出来，避免“修一次又来一次”）：
+  1. **路线A（不惜代价 / 最佳方案）**：固定上游 TS 版本（pin 到某个 commit/tag），同步脚本只在版本变更时才更新 vendor，并配套更新 golden。
+     - 优点：golden 不会被“上游随手改动”频繁打断，CI/安装更稳定。
+     - 缺点：需要你接受“上游改了但我们不立刻跟”的节奏管理。
+  2. **路线B（先能用 / 立即恢复）**：继续按 golden 的定义办事：既然 vendor 更新了，就更新 golden 期望输出对齐新 bundle。
+     - 优点：最快恢复 `make install`，符合当前工作流（install 前强校验）。
+     - 缺点：上游只要一改布局算法，就可能再次需要更新 golden。
+- 决定（本次先按你当前诉求）：先走路线B，把测试修到通过，保证 `make install` 恢复。
+- 计划：
+  - [x] 重新确认 vendor bundle 已更新为本次构建产物（sha256 `18ac06ce...`）
+  - [x] 跑 `cargo test --test ascii_testdata`，枚举所有 mismatch 的 golden 文件
+  - [x] 更新所有受影响的 `tests/testdata/{ascii,unicode}/*.txt` 期望输出
+  - [x] 验证：`cargo test` 全通过
+  - [x] 验证：`make install` 端到端通过
+- 状态：
+  - 已完成：golden 已对齐最新 vendor bundle，`make install` 恢复可用
+  - 额外改良：`tests/ascii_testdata.rs` 新增 `UPDATE_GOLDEN=1` 自动更新 golden 的模式，避免下次再手工改一堆文件
+  - 观察：`preserve_order_of_definition` 这一类“自环/循环边”案例在本次 vendor bundle 下渲染明显变慢，导致 `cargo test`（尤其是 ascii golden）耗时大幅上升
+
+### 2026-02-03 00:07
+- 新需求：git 提交（把当前工作区变更提交到仓库）。
+- 动机：
+  - 让本次“native pathfinder 加速 + golden 更新 + agent/openspec 配置”等改动具备可追溯性。
+  - 避免工作区长期漂移，后续排查问题会变得困难。
+- 计划：
+  - [x] 清理不该入库的文件（重点：`.DS_Store`），并补齐 `.gitignore`
+  - [x] 补齐缺失的新增文件纳入版本控制（例如 `src/native_pathfinder.rs`）
+  - [x] 本地验证：`cargo fmt --all` + `cargo test`（有 error/warn 就当作失败处理）
+  - [ ] 组织提交：按 conventional commits 写 commit message，并完成提交
+  - [ ] 记录产出：更新 `WORKLOG.md`（必要时补充 `notes.md` / `ERRORFIX.md`）

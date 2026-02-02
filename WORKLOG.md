@@ -72,3 +72,33 @@
 
 - 改良 `Makefile`：`make install` 先执行 `make sync-vendor-verify`（同步上游 TS bundle + `cargo test`），再做 `cargo build --release` 并安装到 `INSTALL_DIR`
 - 验证：`make install INSTALL_DIR=/tmp/beautiful-mermaid-rs-install` 执行成功（tsup build + Rust tests + release build + copy）
+
+## 2026-02-02 16:25 - 同步 vendor bundle 后更新 golden testdata（对齐最新渲染输出）
+
+- 背景：`make install` 执行 `sync-vendor-verify` 时，ASCII/Unicode 的 golden 输出对比失败（渲染布局变更）。
+- 更新 golden files（期望输出对齐最新 vendor bundle）：
+  - `tests/testdata/ascii/ampersand_lhs_and_rhs.txt`
+  - `tests/testdata/ascii/preserve_order_of_definition.txt`
+  - `tests/testdata/ascii/self_reference_with_edge.txt`
+  - 以及对应的 `tests/testdata/unicode/*.txt`
+- 验证：
+  - `cargo test` 全通过
+  - `make install` 端到端通过（tsup build → sync vendor → cargo test → release build → install）
+
+## 2026-02-02 21:24 - TS bundle 再次变更后修复 golden，并增加 `UPDATE_GOLDEN` 更新模式
+
+- 背景：上游 TS 仓库本次构建产物更新（vendor sha256 变为 `18ac06ce...`），导致多个 ASCII/Unicode golden 输出发生变化，`make install` 再次被拦截。
+- 更新 golden files（对齐最新 vendor bundle 输出）：
+  - `tests/testdata/ascii/ampersand_lhs_and_rhs.txt`
+  - `tests/testdata/ascii/cls_all_relationships.txt`
+  - `tests/testdata/ascii/er_identifying.txt`
+  - `tests/testdata/ascii/preserve_order_of_definition.txt`
+  - `tests/testdata/ascii/self_reference_with_edge.txt`
+  - 以及对应的 `tests/testdata/unicode/*.txt`
+- 改良测试体验：`tests/ascii_testdata.rs` 增加 `UPDATE_GOLDEN=1` 模式
+  - mismatch 时自动把渲染结果写回 golden 文件
+  - 更新完成后 panic 提示“重新运行测试确认稳定”（避免 silent 更新导致误判）
+- 新增 `.envrc`：提供 `UPDATE_GOLDEN=0` 默认值与说明（配合 direnv 使用）
+- 验证：
+  - `cargo test` 全通过
+  - `make install` 端到端通过（tsup build → sync vendor → cargo test → release build → install）
