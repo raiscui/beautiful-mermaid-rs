@@ -102,3 +102,19 @@
 - 验证：
   - `cargo test` 全通过
   - `make install` 端到端通过（tsup build → sync vendor → cargo test → release build → install）
+
+## 2026-02-03 00:18 - Native pathfinder：把 A* 热循环从 JS 挪到 Rust（显著加速 CLI）
+
+- 背景：
+  - `beautiful-mermaid-rs` 的 CLI 在 ASCII/Unicode 渲染 Flowchart/State 时，会频繁运行 A* 路由。
+  - 在 QuickJS（无 JIT）里跑 A* 的 heap pop + 4 邻居扩展属于典型热循环，遇到复杂用例会明显变慢。
+- 方案：
+  - 新增 `src/native_pathfinder.rs`：用 Rust 实现 A*（含 strict 约束版本），并复用内部大数组（stamp 技巧）减少分配/清空成本。
+  - 在 `src/js.rs` 里通过 `rquickjs` 注册全局函数：
+    - `globalThis.__bm_getPath(...)`
+    - `globalThis.__bm_getPathStrict(...)`
+  - TS bundle 会在运行时检测这两个函数；存在则走 native（Rust）实现，否则回退纯 JS 版本。
+- 配套改良：
+  - `.gitignore` 增加 `.DS_Store`，并从仓库移除已被误提交的 `.DS_Store`（避免无意义的噪音变更）。
+- 验证：
+  - `cargo test` 全通过（包含 ASCII/Unicode golden + SVG smoke + unicode id smoke）。

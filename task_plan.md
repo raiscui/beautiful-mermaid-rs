@@ -177,5 +177,5 @@
   - [x] 清理不该入库的文件（重点：`.DS_Store`），并补齐 `.gitignore`
   - [x] 补齐缺失的新增文件纳入版本控制（例如 `src/native_pathfinder.rs`）
   - [x] 本地验证：`cargo fmt --all` + `cargo test`（有 error/warn 就当作失败处理）
-  - [ ] 组织提交：按 conventional commits 写 commit message，并完成提交
-  - [ ] 记录产出：更新 `WORKLOG.md`（必要时补充 `notes.md` / `ERRORFIX.md`）
+  - [x] 组织提交：按 conventional commits 写 commit message，并完成提交
+  - [x] 记录产出：更新 `WORKLOG.md`（必要时补充 `notes.md` / `ERRORFIX.md`）

@@ -53,3 +53,12 @@
 - 性能观察（需要关注）：
   - `preserve_order_of_definition` 这类包含自环/循环边的图，在当前 vendor bundle 下渲染耗时明显变长（单个案例可达 ~50s）。
   - 这会导致 `cargo test` 的 golden 部分整体耗时上升（本机观测可达 70-100s 级别）。
+
+## 2026-02-03 00:18 - 性能治理方向：把 A* 路由的热循环 native 化
+
+- 关键认知：
+  - QuickJS 没有 JIT，CPU 密集型算法（如 A* + heap）在解释执行下会被放大常数开销。
+  - ASCII/Unicode 渲染里，A* 的 “pop + 4 邻居扩展” 会被调用很多次，是最典型的热路径。
+- 落地策略（本仓库已实现）：
+  - 用 Rust 实现 A*（含 strict 约束版本），并通过 `rquickjs` 暴露 `globalThis.__bm_getPath*`。
+  - TS bundle 只要做一个“存在性检测”，就能在不改外部 API 的前提下自动启用 native 加速。
