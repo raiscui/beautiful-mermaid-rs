@@ -179,3 +179,42 @@
   - [x] 本地验证：`cargo fmt --all` + `cargo test`（有 error/warn 就当作失败处理）
   - [x] 组织提交：按 conventional commits 写 commit message，并完成提交
   - [x] 记录产出：更新 `WORKLOG.md`（必要时补充 `notes.md` / `ERRORFIX.md`）
+
+### 2026-02-03 14:08
+- 新需求：重写 `README.md`，介绍本项目；并把“原 TS 版 beautiful-mermaid 存在的问题”与“本项目做的变动”写清楚。
+- 动机：
+  - README 是仓库入口，决定了读者的第一印象与理解成本。
+  - 当前 README 偏“用法速查”，但缺少：项目定位、与上游关系、修复了什么问题、为什么要这样实现。
+- 两种写法路线（先摆出来，避免写到一半又推翻）：
+  1. **路线A（不惜代价 / 最佳方案）**：README 同时面向使用者与维护者，包含：
+     - 项目定位与适用场景
+     - 与上游 TS 的关系（vendor bundle、同步方式、许可证）
+     - “问题 → 根因 → 修复 → 验证”清单（可长期维护）
+     - 关键工程化改动（测试、脚本、CLI 约定、性能加速）
+  2. **路线B（先能用 / 后面再优雅）**：README 只保留快速上手，细节挪到 `docs/`。
+     - 优点：更短
+     - 缺点：读者很难理解“为什么存在”和“到底改了什么”，不符合本次诉求
+- 决定：采用路线A（你明确要求“把问题与变动写清楚”，不能只写简版）。
+- 计划：
+  - [x] 从 `WORKLOG.md` / `task_plan.md` / `notes.md` 提炼“上游问题 + 修复点”的事实，避免写成口号
+  - [x] 重写 README 结构：先“是什么/为什么”，再“怎么用”，最后“维护/同步/测试/排错”
+  - [x] 如 README 中包含 Mermaid 图，使用 `mermaid-validator` 校验语法
+  - [x] 完成后把本次动作记录到 `WORKLOG.md`
+- 状态：
+  - 已完成：`README.md` 已补齐“项目定位 / 架构概览 / 上游问题与修复 / 本仓库改动清单”
+  - 已完成：README 内 Mermaid 图已通过 `mermaid-validator` 语法校验
+  - 已验证：`cargo test` 全通过
+
+### 2026-02-03 14:17
+- 新需求：git 提交（提交本次 README 重写相关改动）。
+- 动机：
+  - 让本次文档与工作记录进入可追溯的提交历史，避免工作区长期漂移。
+  - 让其他机器/CI 拉取后即可复现当前 README 与文档描述。
+- 计划：
+  - [x] 查看工作区变更：`git status` / `git diff`（确认没有误改/大文件）
+  - [x] 检查是否存在 submodule 变更（如有则一并提交）
+  - [x] 运行格式化与测试：`cargo fmt --all` + `cargo test`（有 error/warn 视为失败）
+  - [x] 组织提交：实际提交为 `feat:`（因为包含 Rust API 新增：ASCII meta）
+  - [x] 提交后补写工作记录：把 commit 行为追加到 `WORKLOG.md`
+- 状态：
+  - 已完成：已提交本次改动（README 重写 + `render_mermaid_ascii_with_meta` + vendor 同步 + 测试）

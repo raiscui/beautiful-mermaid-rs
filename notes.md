@@ -62,3 +62,29 @@
 - 落地策略（本仓库已实现）：
   - 用 Rust 实现 A*（含 strict 约束版本），并通过 `rquickjs` 暴露 `globalThis.__bm_getPath*`。
   - TS bundle 只要做一个“存在性检测”，就能在不改外部 API 的前提下自动启用 native 加速。
+
+## 2026-02-03 14:08 - README 重写要点（上游问题 & 本仓库改动）
+
+### 上游 TS 版 beautiful-mermaid 暴露过的问题（本仓库已通过 vendor bundle 同步修复）
+
+- Flowchart/State parser 的节点/子图 ID 匹配过于“ASCII 化”（例如 `\\w` / `[\\w-]`）：
+  - 现象：中文/Unicode ID 解析丢失，最终进入 dagre 空图布局，输出出现 `-Infinity` 或空白。
+  - 修复方向：用 Unicode 属性类（例如 `\\p{L}\\p{N}`）替代 `\\w`，并开启 `u` flag。
+- ASCII/Unicode 渲染里对宽字符（中文/emoji）用字符串长度做宽度估算：
+  - 现象：边框/连线错位，右边框会被“顶出去”。
+  - 修复方向：引入（简化版）`wcwidth` 逻辑，以“终端显示宽度”而不是 “string length” 计算布局。
+
+### 本仓库需要在 README 里讲清楚的关键改动
+
+- Rust 侧提供“库 + CLI”：
+  - 公共 API：`render_mermaid()` / `render_mermaid_ascii()`。
+  - CLI：stdin → SVG/ASCII，支持 `--help/--version`，并定义 exit code 约定。
+- 实现策略：Rust 内嵌 QuickJS（`rquickjs`）执行 browser IIFE bundle，快速对齐 TS 行为。
+  - thread-local：每线程一个 JS 引擎实例，避免跨线程共享 Context。
+- vendor 同步工作流：
+  - `scripts/sync-vendor-bundle.sh` + `make sync-vendor(-verify)` + `make install`（install 前强制同步并跑 `cargo test`）。
+- 测试策略：
+  - ASCII/Unicode golden tests（对齐 TS 的 whitespace normalize）。
+  - `UPDATE_GOLDEN=1` 模式 + `.envrc`（direnv）降低维护成本。
+- 性能加速（QuickJS 无 JIT 的现实补偿）：
+  - Native pathfinder：把 A* 热循环挪到 Rust，并通过 `globalThis.__bm_getPath*` 注入给 JS；bundle 运行时检测并自动启用。

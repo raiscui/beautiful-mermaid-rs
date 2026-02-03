@@ -11,7 +11,7 @@
 
 use crate::error::{BeautifulMermaidError, Result};
 use crate::native_pathfinder::NativeAStar;
-use crate::types::{AsciiRenderOptions, RenderOptions};
+use crate::types::{AsciiRenderOptions, AsciiRenderWithMeta, RenderOptions};
 use once_cell::unsync::OnceCell;
 use rquickjs::function::{FromParams, IntoJsFunc, ParamRequirement, Params};
 use rquickjs::{Context, Function, IntoJs, Object, Promise, Runtime, TypedArray, Value};
@@ -267,6 +267,38 @@ impl JsEngine {
         self.drain_pending_jobs()?;
 
         Ok(rendered)
+    }
+
+    /// 渲染 Mermaid -> ASCII/Unicode + meta（同步）。
+    pub fn render_mermaid_ascii_with_meta(
+        &self,
+        text: &str,
+        options: &AsciiRenderOptions,
+    ) -> Result<AsciiRenderWithMeta> {
+        let json = self.context.with(|ctx| -> Result<String> {
+            let beautiful_mermaid: Object = ctx.globals().get("beautifulMermaid")?;
+            let render_fn: Function = beautiful_mermaid.get("renderMermaidAsciiWithMeta")?;
+
+            let js_options = Self::ascii_options_to_js(&ctx, options)?;
+            let result: Value = render_fn.call((text, js_options))?;
+
+            // 设计取舍：
+            // - 这里用 JSON.stringify 做一次“跨语言对象”的稳定传输，
+            //   避免在 Rust 侧手写 Object/Array 的深度解析逻辑。
+            let json_obj: Object = ctx.globals().get("JSON")?;
+            let stringify: Function = json_obj.get("stringify")?;
+            let output: String = stringify.call((result,))?;
+            Ok(output)
+        })?;
+
+        // 保守处理：把可能残留的 Promise job 队列清空，避免跨调用累积。
+        self.drain_pending_jobs()?;
+
+        serde_json::from_str::<AsciiRenderWithMeta>(&json).map_err(|err| {
+            BeautifulMermaidError::Json {
+                message: format!("解析 renderMermaidAsciiWithMeta 输出失败: {err}"),
+            }
+        })
     }
 
     /// 渲染 Mermaid -> SVG（TS 版返回 Promise，这里同步等待）。

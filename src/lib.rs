@@ -13,7 +13,10 @@ pub mod theme;
 pub mod types;
 
 pub use error::{BeautifulMermaidError, Result};
-pub use types::{AsciiRenderOptions, RenderOptions};
+pub use types::{
+    AsciiBox, AsciiDrawingCoord, AsciiRenderMeta, AsciiRenderMetaEdge, AsciiRenderMetaNode,
+    AsciiRenderOptions, AsciiRenderWithMeta, RenderOptions,
+};
 
 /// 渲染 Mermaid -> SVG（阻塞）。
 ///
@@ -27,4 +30,16 @@ pub fn render_mermaid(text: &str, options: &RenderOptions) -> Result<String> {
 /// 渲染 Mermaid -> ASCII/Unicode（阻塞，同步）。
 pub fn render_mermaid_ascii(text: &str, options: &AsciiRenderOptions) -> Result<String> {
     js::with_js_engine(|engine| engine.render_mermaid_ascii(text, options))
+}
+
+/// 渲染 Mermaid -> ASCII/Unicode + meta（阻塞，同步）。
+///
+/// 说明：
+/// - `text` 字段等价于 `render_mermaid_ascii(...)` 的输出；
+/// - `meta` 提供 node/edge 在字符画上的坐标信息，便于上层 UI 做高亮/动画。
+pub fn render_mermaid_ascii_with_meta(
+    text: &str,
+    options: &AsciiRenderOptions,
+) -> Result<AsciiRenderWithMeta> {
+    js::with_js_engine(|engine| engine.render_mermaid_ascii_with_meta(text, options))
 }

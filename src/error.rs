@@ -21,4 +21,8 @@ pub enum BeautifulMermaidError {
     /// JS bundle 初始化失败（比如 bundle 文件缺失或 eval 失败）。
     #[error("初始化失败: {message}")]
     Init { message: String },
+
+    /// JS 返回值的 JSON 解析失败（通常表示 bundle/API 与 Rust 侧类型不匹配）。
+    #[error("JSON 解析失败: {message}")]
+    Json { message: String },
 }

@@ -118,3 +118,28 @@
   - `.gitignore` 增加 `.DS_Store`，并从仓库移除已被误提交的 `.DS_Store`（避免无意义的噪音变更）。
 - 验证：
   - `cargo test` 全通过（包含 ASCII/Unicode golden + SVG smoke + unicode id smoke）。
+
+## 2026-02-03 14:12 - 重写 README：补齐“项目定位 / 上游问题 / 本仓库改动”
+
+- 更新 `README.md`：
+  - 新增 TL;DR（CLI 最快上手命令）
+  - 新增“为什么有这个项目”（讲清楚定位与适用场景）
+  - 新增“架构概览”（用 Mermaid 图说明：Mermaid → QuickJS → vendor bundle → SVG/ASCII）
+  - 新增“原 TS 版 beautiful-mermaid 暴露过的问题”（问题→根因→修复→验证）：
+    - Unicode 节点 ID（中文 ID）导致 `-Infinity` / 空白
+    - 宽字符（中文/emoji）导致 ASCII/Unicode 边框错位
+    - QuickJS（无 JIT）下 A* 路由变成性能瓶颈，并用 native pathfinder 解决
+  - 新增“本仓库做了哪些可见的改动”清单（API/CLI/脚本/测试/黄金文件更新模式）
+  - 补充“测试与 golden”说明（包含 `UPDATE_GOLDEN=1` 用法与 `.envrc` 提示）
+- 验证：README 内的 Mermaid 图已通过 `mermaid-validator` 语法校验
+- 验证：`cargo test` 全通过
+
+## 2026-02-03 14:20 - git 提交（提交本次 README + meta API 相关改动）
+
+- 已执行：`cargo fmt --all` + `cargo test`（全通过）
+- 已提交：`feat: add ASCII render meta API`
+  - 新增：`render_mermaid_ascii_with_meta`（ASCII/Unicode + meta）
+  - 新增：ASCII meta 类型（node/edge/box/path）
+  - 同步：vendor bundle（`renderMermaidAsciiWithMeta`）
+  - 新增：`tests/ascii_meta_smoke.rs`（text 与旧 API 严格一致 + meta 可用）
+  - 更新：`README.md`（项目定位 / 上游问题 / 本仓库改动）

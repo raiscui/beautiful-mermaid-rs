@@ -58,3 +58,63 @@ pub struct AsciiRenderOptions {
     /// 节点盒子内部边框 padding。
     pub box_border_padding: Option<i32>,
 }
+
+// ============================================================================
+// ASCII/Unicode 渲染 meta（给 TUI 上色/动画用）
+// ============================================================================
+//
+// 设计目标：
+// - 让上层 UI 能“稳定地”对 node box / edge stroke 做 cell-level 的高亮与动画；
+// - 避免在 Rust 侧重新解析最终文本（那会非常脆弱，且难以处理宽字符/拐点/箭头等细节）。
+
+/// 终端字符画上的坐标（以“终端 cell”为单位，而不是字符串字节/字符索引）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AsciiDrawingCoord {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// 终端字符画上的矩形区域（同样以“终端 cell”为单位）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AsciiBox {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// 节点（node box）的 meta：用于定位并高亮某个 box。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AsciiRenderMetaNode {
+    /// Mermaid node id（parser identity），例如 "Hat_planner"。
+    pub id: String,
+    /// 节点内部展示的 label 文本（可能包含 emoji/中文）。
+    pub label: String,
+    /// box 的矩形范围（坐标来自 TS 渲染器）。
+    #[serde(rename = "box")]
+    pub box_rect: AsciiBox,
+}
+
+/// 边（edge）的 meta：用于按 path 做逐段点亮动画。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AsciiRenderMetaEdge {
+    pub from: String,
+    pub to: String,
+    pub label: String,
+    /// edge stroke 的“有序坐标序列”（包含拐点/箭头等关键格子）。
+    pub path: Vec<AsciiDrawingCoord>,
+}
+
+/// ASCII/Unicode 渲染的完整 meta（nodes + edges）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AsciiRenderMeta {
+    pub nodes: Vec<AsciiRenderMetaNode>,
+    pub edges: Vec<AsciiRenderMetaEdge>,
+}
+
+/// ASCII/Unicode 渲染的输出：text + meta。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AsciiRenderWithMeta {
+    pub text: String,
+    pub meta: AsciiRenderMeta,
+}
