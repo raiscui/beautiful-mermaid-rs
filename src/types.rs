@@ -60,6 +60,36 @@ pub struct AsciiRenderOptions {
 }
 
 // ============================================================================
+// Mermaid 语法校验（validator）
+// ============================================================================
+//
+// 设计目标：
+// - 提供一个“可机器消费”的校验输出：true/false + error/details；
+// - 让 CLI/CI 能稳定判断 Mermaid 是否有效，并打印出可读的失败原因；
+//
+// 重要说明：
+// - 当前实现是“纯语法校验”：
+//   - 后端使用纯 Rust parser（`selkie::parse`）判断 Mermaid 是否可被解析。
+//   - 它更适合做 CI gate, 以及在无 Node 环境下做快速检查。
+// - 它不保证“本仓库渲染器一定能渲染”：
+//   - 本仓库的渲染 JS bundle 目前只明确支持 Flowchart/State、Sequence、Class、ER。
+//   - 语法有效 != 渲染一定成功（尤其是其他 Mermaid 图类型）。
+// - 它也不保证与 Mermaid 官方 CLI（@mermaid-js/mermaid-cli）100% 一致：
+//   - 但错误信息通常会带行列, 足够定位问题。
+
+/// Mermaid 语法校验结果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MermaidValidation {
+    /// true 表示语法/语义被当前渲染器接受。
+    pub is_valid: bool,
+    /// 失败时的主错误信息（适合单行打印）。
+    pub error: Option<String>,
+    /// 失败时的细节信息（通常是 stack trace 或更长的上下文）。
+    pub details: Option<String>,
+}
+
+// ============================================================================
 // ASCII/Unicode 渲染 meta（给 TUI 上色/动画用）
 // ============================================================================
 //

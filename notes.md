@@ -88,3 +88,66 @@
   - `UPDATE_GOLDEN=1` 模式 + `.envrc`（direnv）降低维护成本。
 - 性能加速（QuickJS 无 JIT 的现实补偿）：
   - Native pathfinder：把 A* 热循环挪到 Rust，并通过 `globalThis.__bm_getPath*` 注入给 JS；bundle 运行时检测并自动启用。
+
+## 2026-02-06 16:05 - 修复 golden 过期（Unicode）
+
+- 触发方式：`make install` 内部的 `sync-vendor-verify` 重新构建并同步了 TS bundle（sha256 `b48b9228...`）。
+- 现象：`tests/ascii_testdata.rs` 的 `unicode_testdata_matches_reference` 首个 mismatch 暴露为 `ampersand_lhs_and_rhs`。
+  - 因为测试遇到第一个 mismatch 会立刻 `assert_eq!` 退出, 所以只看失败输出会漏掉后续 mismatch。
+- 修复方式：使用仓库内置的 golden 自动更新模式。
+  - 命令：`UPDATE_GOLDEN=1 cargo test --test ascii_testdata unicode_testdata_matches_reference`
+  - 实际更新了 2 个文件：
+    - `tests/testdata/unicode/ampersand_lhs_and_rhs.txt`
+    - `tests/testdata/unicode/preserve_order_of_definition.txt`
+- 验证：
+  - `cargo test` 全通过。
+  - `make install` 端到端通过（tsup build → sync vendor → cargo test → release install）。
+
+## 2026-02-06 16:39 - Mermaid validator 集成调研（来自 mcp-mermaid-validator）
+
+## 来源
+
+### 来源1: `/Users/cuiluming/local_doc/l_dev/my/rust/mcp-mermaid-validator/src/main.ts`
+- 这是一个 MCP server, 对外提供工具 `validateMermaid`.
+- 输入:
+  - `diagram: string`
+- 输出结构化字段:
+  - `isValid: boolean`
+  - `error?: string`
+  - `details?: string`
+- 核心校验机制:
+  - 通过 `child_process.spawn` 调用:
+    - `npx @mermaid-js/mermaid-cli -i /dev/stdin -o - -e png`
+  - 把 Mermaid 文本写入子进程 stdin.
+  - stdout 的图片数据直接丢弃, 只拿“能否成功生成”作为语法有效性的判据.
+  - stderr 会累计为 errorOutput, 在失败时拼进错误信息, 作为 `details`.
+- 失败模型:
+  - 子进程退出码非 0, 则认为 Mermaid 无效.
+  - 返回 `isValid=false`, 并把错误主信息与 stderr 细节拆分出来.
+
+## 综合发现
+
+- 这个 validator 的本质是“能否成功渲染”的副作用校验, 并不单独做 parse-only.
+- 如果我们要把它“集成到 Rust crate”, 至少需要对齐两点:
+  1. 给出稳定的 `true/false + error/details` 输出模型（便于 CLI/CI 消费）。
+  2. 避免把 `mcp-mermaid-validator` 作为依赖引入（可以选择复刻其策略, 或用本仓库 QuickJS 渲染器作为校验后端）。
+
+## 2026-02-06 16:54 - validator 后端选择: QuickJS 渲染器太宽松, 改用纯 Rust parser
+
+- 尝试过的方案: 在 QuickJS 里调用本仓库的 `beautifulMermaid.renderMermaid(...)` 作为“是否有效”的判据。
+- 发现的问题:
+  - Flowchart/graph 的解析非常宽松, 很多明显不合法的输入也会返回“可渲染”, 导致校验几乎恒为 true.
+  - 这不符合我们对 validator 的期望: 必须能在语法错误时给出可靠的 false + 错误信息.
+- 最终选择:
+  - 采用 `selkie-rs`（mermaid.js 的 Rust port）作为 parse/validate 后端.
+  - `selkie::parse` 在遇到语法错误时会返回包含行列信息的 parse error 字符串, 更适合做严格校验与 CI gate.
+
+## 2026-02-06 19:33 - QuickJS 性能：native pathfinder 覆盖范围
+
+- 结论：
+  - `__bm_getPath`：非 strict A*（仅 blocked + bounds）。
+  - `__bm_getPathStrict`：strict A*（禁 `┼` + segment reuse 规则）。
+  - `__bm_getPathRelaxed`：relaxed A*（允许 crossing，但对潜在 `┼` 加惩罚；并执行“不共线重叠”的 segment hard rule）。
+- 为什么必须补 `__bm_getPathRelaxed`：
+  - Unicode 默认 routing=relaxed。
+  - 如果 relaxed 没有 native fast path，CLI 下仍会回退到纯 JS A*，QuickJS 无 JIT 会非常慢。

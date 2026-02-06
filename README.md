@@ -28,6 +28,18 @@ printf 'graph LR\nA --> B\n' | beautiful-mermaid-rs --ascii
 printf 'graph LR\nA --> B\n' | beautiful-mermaid-rs --ascii --use-ascii
 ```
 
+- Mermaid 语法校验（stdout 输出 true/false）：
+
+```bash
+printf 'graph LR\nA --> B\n' | beautiful-mermaid-rs --validate
+```
+
+- Markdown 内 Mermaid 代码块校验（stdout 输出 true/false）：
+
+```bash
+cat README.md | beautiful-mermaid-rs --validate-markdown
+```
+
 更完整的 CLI 说明见：`docs/code-agent-cli.md`。
 
 ## 为什么有这个项目
@@ -138,17 +150,21 @@ JS bundle 位于：`vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js
 - Rust 公共 API：
   - `render_mermaid(text, options) -> Result<String>`（SVG）
   - `render_mermaid_ascii(text, options) -> Result<String>`（ASCII/Unicode）
+  - `validate_mermaid(text) -> Result<MermaidValidation>`（语法校验: true/false + 错误信息）
 - Rust CLI：
   - 只从 stdin 读 Mermaid（不接受"文件路径参数"）。
   - 默认输出 SVG。
   - `--ascii` 输出 ASCII/Unicode。
   - `--use-ascii` 强制纯 ASCII（必须与 `--ascii` 一起用）。
+  - `--validate` 校验 Mermaid 语法（stdout 输出 true/false）。
+  - `--validate-markdown` 扫描 Markdown, 校验其中所有 ```mermaid 代码块。
   - 退出码约定：`0` 成功 / `1` 渲染失败 / `2` 用法或参数错误。
   - pipe 下游提前关闭（BrokenPipe）按 Unix 习惯视为成功退出。
 - 工程化与可维护性：
   - `scripts/sync-vendor-bundle.sh`：一键从 TS 仓库构建并同步 bundle。
   - `make sync-vendor` / `make sync-vendor-verify`：同步 bundle（可选带测试验证）。
   - `make install`：安装前强制先同步 + `cargo test`，避免"装出去的是旧逻辑"。
+  - `make validate-docs`：批量校验 README/docs 里的 Mermaid code fence, 防止文档里的图坏掉。
   - golden tests：`tests/testdata/{ascii,unicode}`。
   - `UPDATE_GOLDEN=1` 模式自动更新 golden（默认关闭，见 `.envrc`）。
 

@@ -218,3 +218,74 @@
   - [x] 提交后补写工作记录：把 commit 行为追加到 `WORKLOG.md`
 - 状态：
   - 已完成：已提交本次改动（README 重写 + `render_mermaid_ascii_with_meta` + vendor 同步 + 测试）
+
+### 2026-02-06 16:00
+- 现象：你执行 `make install` 时，端到端验证阶段 `cargo test` 失败。
+  - 失败用例：`tests/testdata/unicode/ampersand_lhs_and_rhs.txt`
+  - 报错点：`tests/ascii_testdata.rs` 的 `unicode_testdata_matches_reference`
+  - 判断：上游 TS bundle 更新后，Unicode 渲染布局发生变化，导致 golden 参考输出过期。
+- 两种处理路线（先摆出来，避免修完立刻又遇到同类问题）：
+  1. **路线A（不惜代价 / 最佳方案）**：pin 上游 TS 仓库的 commit/tag，并把该版本信息写进同步脚本输出或仓库文档。
+     - 优点：golden 更稳定，安装流程更少被打断。
+     - 缺点：需要接受“上游变更不立刻跟进”的节奏管理。
+  2. **路线B（先能用 / 立即恢复）**：接受最新 bundle 的输出，并更新 golden files 对齐当前渲染结果。
+     - 优点：最快恢复 `make install` 的可用性。
+     - 缺点：上游布局算法再变时，golden 仍可能需要更新。
+- 决定（按你这次的诉求）：先走路线B, 把测试修到通过, 让 `make install` 立即恢复。
+- 计划：
+  - [x] 使用 `UPDATE_GOLDEN=1` 模式自动更新过期 golden（避免手改拷贝字符出错）
+  - [x] 重新运行 `cargo test` 确认全绿
+  - [x] 重新运行 `make install` 做端到端验证
+- 状态：
+  - 已完成：已更新 2 个 Unicode golden（`ampersand_lhs_and_rhs`、`preserve_order_of_definition`），并验证 `cargo test`、`make install` 全通过。
+
+### 2026-02-06 16:39
+- 新需求：直接集成 `/Users/cuiluming/local_doc/l_dev/my/rust/mcp-mermaid-validator` 的 Mermaid validator 功能到本仓库，但不引入 `mcp-mermaid-validator` 这个依赖。
+- 动机：
+  - 目前 Mermaid 语法校验依赖外部 MCP server，不够“就地自包含”，也不利于离线/CI 场景复用。
+  - 希望把“语法校验能力”变成 Rust API/CLI 的一等公民，并能在纯 Rust 环境跑通（不依赖 Node）。
+- 两种实现路线（先摆出来，避免做到一半才发现方向不对）：
+  1. **路线A（不惜代价 / 最佳方案）**：引入纯 Rust 的 Mermaid parser 作为 validator（选型：`selkie-rs`，目标是 mermaid.js 的 Rust port）：
+     - 核心策略：只做 parse/validate，不做渲染输出；返回稳定的 `true/false + error/details` 结果模型。
+     - 优点：无 Node 运行时依赖；语法校验更严格，覆盖的 Mermaid 类型也更广；适合 CI/离线使用。
+     - 缺点：新增 Rust 依赖；与官方 Mermaid CLI 的行为可能存在少量差异。
+  2. **路线B（先能用 / 行为最对齐）**：在 Rust 里复刻 MCP 版本的做法，spawn `npx @mermaid-js/mermaid-cli` 进行校验。
+     - 优点：与 MCP 工具行为更一致，更接近“官方 Mermaid”语义。
+     - 缺点：运行时依赖 Node/npx/Chromium，速度与稳定性都更不可控，不符合本仓库“运行时不依赖 Node”的定位。
+- 决定：实现路线A（纯 Rust validator）。如果后续你确实需要“严格对齐官方 Mermaid CLI”的校验，再把路线B 作为可选后端补上。
+- 计划：
+  - [x] 阶段1: 研究并记录 MCP validator 的输入/输出/错误信息模型（写入 `notes.md`）。
+  - [x] 阶段2: 在 lib 增加 `validate_mermaid` API + `MermaidValidation` 类型（实现为纯 Rust parser 校验）。
+  - [x] 阶段3: 扩展 CLI: `--validate`（校验单图）与 `--validate-markdown`（扫描 Markdown 中 ```mermaid 代码块）。
+  - [x] 阶段4: 增加回归测试 + 更新文档 + `cargo fmt --all` + `cargo test` 验证交付。
+- 状态：
+  - 已完成：新增 `validate_mermaid(...) -> MermaidValidation`（后端为 `selkie::parse`）。
+  - 已完成：CLI 新增 `--validate` 与 `--validate-markdown`，stdout 输出 `true/false`，stderr 输出错误细节。
+  - 已完成：新增测试 `tests/validate_smoke.rs`，并更新 `docs/code-agent-cli.md`。
+  - 已验证：`cargo fmt --all` + `cargo test` 全通过。
+
+### 2026-02-06 17:09
+- 新需求：增加 `make validate-docs`，批量校验 `README.md` 与 `docs/**/*.md` 内的 ```mermaid code fence。
+- 动机：
+  - 把“文档 Mermaid 图的语法正确性”变成一条可重复执行的命令。
+  - 这样本地与 CI 都能快速 gate, 避免 README/docs 里的图悄悄坏掉。
+- 计划：
+  - [x] 在 `Makefile` 增加 `validate-docs` target（逐文件执行 `--validate-markdown`，失败即退出）。
+  - [x] 更新文档：补充 `make validate-docs` 的用途与示例。
+  - [x] 验证：运行 `make validate-docs` 通过。
+- 状态：**已完成** - `make validate-docs` 已可作为文档 Mermaid 图的快速 gate。
+
+### 2026-02-06 19:33
+- 新需求：Unicode（默认 relaxed）在 QuickJS 下渲染过慢，希望启用 Rust native A* 加速 relaxed 路由。
+- 现象：
+  - `cargo test --test ascii_testdata unicode_testdata_matches_reference` 在本机出现 70-100s 级别耗时。
+  - 主要卡在 A* 路由热循环（QuickJS 无 JIT）。
+- 根因：
+  - Rust 侧只注入了 `__bm_getPath` / `__bm_getPathStrict`。
+  - 但 TS 的 relaxed 路由走 `getPathRelaxed()`，之前没有 native fast path → 仍在 QuickJS 跑纯 JS A*。
+- 计划：
+  - [x] Rust：实现 native relaxed A*（步长 + crossing penalty + segment reuse hard rule）并注入 `globalThis.__bm_getPathRelaxed(...)`。
+  - [x] TS：`getPathRelaxed()` 优先调用 `__bm_getPathRelaxed`（不存在则回退 JS）。
+  - [x] 同步 vendor bundle 并跑端到端测试确认输出一致。
+- 状态：
+  - 已完成：`scripts/sync-vendor-bundle.sh` 通过；Unicode golden 用例耗时降到 ~3.6s。

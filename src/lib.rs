@@ -15,7 +15,7 @@ pub mod types;
 pub use error::{BeautifulMermaidError, Result};
 pub use types::{
     AsciiBox, AsciiDrawingCoord, AsciiRenderMeta, AsciiRenderMetaEdge, AsciiRenderMetaNode,
-    AsciiRenderOptions, AsciiRenderWithMeta, RenderOptions,
+    AsciiRenderOptions, AsciiRenderWithMeta, MermaidValidation, RenderOptions,
 };
 
 /// 渲染 Mermaid -> SVG（阻塞）。
@@ -42,4 +42,41 @@ pub fn render_mermaid_ascii_with_meta(
     options: &AsciiRenderOptions,
 ) -> Result<AsciiRenderWithMeta> {
     js::with_js_engine(|engine| engine.render_mermaid_ascii_with_meta(text, options))
+}
+
+/// 校验 Mermaid 语法是否有效（阻塞，同步）。
+///
+/// 返回值约定：
+/// - `Ok(MermaidValidation { is_valid: true, .. })`：有效
+/// - `Ok(MermaidValidation { is_valid: false, .. })`：无效（无法被 parser 解析）
+///
+/// 实现说明：
+/// - 当前版本使用纯 Rust 的 `selkie::parse` 做语法校验（不依赖 Node）。
+/// - 当前实现不会返回 `Err`；保留 `Result` 只是为了未来可替换后端时仍能表达“内部错误”。
+pub fn validate_mermaid(text: &str) -> Result<MermaidValidation> {
+    // --------------------------------------------------------------------
+    // 这里把“空输入”视为“无效 Mermaid”而不是内部错误：
+    // - 调用方可以用 `is_valid` 统一处理；
+    // - CLI 层则可以把它归类为“用法错误”(exit code=2)。
+    // --------------------------------------------------------------------
+    if text.trim().is_empty() {
+        return Ok(MermaidValidation {
+            is_valid: false,
+            error: Some("输入为空".to_string()),
+            details: None,
+        });
+    }
+
+    match selkie::parse(text) {
+        Ok(_diagram) => Ok(MermaidValidation {
+            is_valid: true,
+            error: None,
+            details: None,
+        }),
+        Err(err) => Ok(MermaidValidation {
+            is_valid: false,
+            error: Some(err.to_string()),
+            details: Some(format!("{err:?}")),
+        }),
+    }
 }

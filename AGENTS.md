@@ -2,6 +2,8 @@
 
 ## Project Structure & Module Organization
 
+- js beautiful-mermaid.browser.global.js 源代码 :/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid
+
 - `src/`: Rust library + CLI entrypoint.
   - `src/lib.rs`: public API (`render_mermaid`, `render_mermaid_ascii`).
   - `src/main.rs`: CLI (reads Mermaid from stdin).

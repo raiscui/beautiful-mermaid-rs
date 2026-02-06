@@ -11,6 +11,7 @@
 //   并通过 rquickjs 注入全局函数供 JS 侧调用：
 //   - `globalThis.__bm_getPath(...)`
 //   - `globalThis.__bm_getPathStrict(...)`
+//   - `globalThis.__bm_getPathRelaxed(...)`
 //
 // 设计原则：
 // - 输出必须与原 JS 实现一致（Rust 仓库已有 golden tests 覆盖）
@@ -115,6 +116,7 @@ const CONNECT_UP: u8 = 1 << 2;
 const CONNECT_DOWN: u8 = 1 << 3;
 const H_MASK: u8 = CONNECT_LEFT | CONNECT_RIGHT;
 const V_MASK: u8 = CONNECT_UP | CONNECT_DOWN;
+const RELAXED_PENALTY_CROSSING: u32 = 1;
 
 /// Rust 侧复用的 A* 缓存（对应 TS 的 AStarContext，但不持有 blocked/usage 输入）。
 #[derive(Default)]
@@ -648,6 +650,334 @@ impl NativeAStar {
         Ok(None)
     }
 
+    /// relaxed：允许 crossing（交错），但会对“形成 `┼` 的潜在交叉点”加惩罚；
+    /// 同时遵守“禁止共线重叠”的 segment reuse hard rule（仅允许受控的起点/终点段共享）。
+    ///
+    /// 返回：
+    /// - Some((path, cost))：path 包含 fromIdx/toIdx；cost 是 A* 的累计代价（步长 + 惩罚项）
+    /// - None：不可达
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_path_relaxed(
+        &mut self,
+        stride: usize,
+        height: usize,
+        from_idx: u32,
+        to_idx: u32,
+        max_x: u32,
+        max_y: u32,
+        blocked: &[u8],
+        segment_used: &[u8],
+        used_as_middle: &[u8],
+        start_source: &[u32],
+        start_source_multi: &[u8],
+        end_target: &[u32],
+        end_target_multi: &[u8],
+        used_points: Option<&[u8]>,
+        route_from_idx: u32,
+        route_to_idx: u32,
+        edge_from_id: u32,
+        edge_to_id: u32,
+        allow_end_segment_reuse: bool,
+    ) -> Result<Option<(Vec<u32>, u32)>, String> {
+        self.ensure_capacity(stride, height);
+        let cell_count = stride.saturating_mul(height);
+
+        if cell_count == 0 {
+            return Ok(None);
+        }
+        if blocked.len() < cell_count {
+            return Err(format!(
+                "blocked 长度不足: blocked.len={} < cell_count={cell_count}",
+                blocked.len()
+            ));
+        }
+
+        let seg_count = cell_count.saturating_mul(2);
+        if segment_used.len() < seg_count
+            || used_as_middle.len() < seg_count
+            || start_source.len() < seg_count
+            || start_source_multi.len() < seg_count
+            || end_target.len() < seg_count
+            || end_target_multi.len() < seg_count
+        {
+            return Err(format!(
+                "segmentUsage 长度不足: seg_count={seg_count}, segment_used={}, used_as_middle={}, start_source={}, start_source_multi={}, end_target={}, end_target_multi={}",
+                segment_used.len(),
+                used_as_middle.len(),
+                start_source.len(),
+                start_source_multi.len(),
+                end_target.len(),
+                end_target_multi.len(),
+            ));
+        }
+
+        if let Some(points) = used_points {
+            if points.len() < cell_count {
+                return Err(format!(
+                    "usedPoints 长度不足: used_points.len={} < cell_count={cell_count}",
+                    points.len()
+                ));
+            }
+        }
+
+        let from = from_idx as usize;
+        let to = to_idx as usize;
+        if from >= cell_count || to >= cell_count {
+            return Ok(None);
+        }
+
+        if max_x as usize >= stride || max_y as usize >= height {
+            return Err(format!(
+                "bounds 越界: max_x={max_x}, max_y={max_y}, stride={stride}, height={height}"
+            ));
+        }
+
+        let stamp = self.next_stamp();
+        self.heap.clear();
+
+        self.cost_stamp[from] = stamp;
+        self.cost_so_far[from] = 0;
+        self.came_from[from] = -1;
+        self.heap.push(from_idx, 0, 0);
+
+        let to_y = to / stride;
+        let to_x = to - to_y * stride;
+
+        while let Some((current_idx_u32, current_cost_at_push)) = self.heap.pop() {
+            let current = current_idx_u32 as usize;
+
+            if self.cost_stamp[current] != stamp {
+                continue;
+            }
+            if current_cost_at_push != self.cost_so_far[current] {
+                continue;
+            }
+
+            if current == to {
+                let cost = self.cost_so_far[current];
+                return Ok(Some((self.reconstruct_path(current_idx_u32), cost)));
+            }
+
+            let current_cost = self.cost_so_far[current];
+            let current_y = current / stride;
+            let current_x = current - current_y * stride;
+
+            // -----------------------------------------------------------------
+            // 4 邻居扩展（顺序与 TS 保持一致：右/左/下/上）
+            // -----------------------------------------------------------------
+
+            // 右
+            if current_x < max_x as usize {
+                let next = current + 1;
+                if blocked[next] == 0 || next == to {
+                    let mut penalty = 0;
+                    if let Some(points) = used_points {
+                        penalty += crossing_penalty(points[current], CONNECT_RIGHT);
+                        penalty += crossing_penalty(points[next], CONNECT_LEFT);
+                    }
+
+                    if is_segment_allowed_relaxed(
+                        current,
+                        next,
+                        /*seg_key=*/ current * 2,
+                        segment_used,
+                        used_as_middle,
+                        start_source,
+                        start_source_multi,
+                        end_target,
+                        end_target_multi,
+                        route_from_idx,
+                        route_to_idx,
+                        edge_from_id,
+                        edge_to_id,
+                        allow_end_segment_reuse,
+                    ) {
+                        let new_cost = current_cost + 1 + penalty;
+                        if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                            self.cost_stamp[next] = stamp;
+                            self.cost_so_far[next] = new_cost;
+                            self.came_from[next] = current_idx_u32 as i32;
+
+                            let next_x = current_x + 1;
+                            let abs_x = if next_x >= to_x {
+                                next_x - to_x
+                            } else {
+                                to_x - next_x
+                            };
+                            let abs_y = if current_y >= to_y {
+                                current_y - to_y
+                            } else {
+                                to_y - current_y
+                            };
+                            let h = abs_x as u32
+                                + abs_y as u32
+                                + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                            self.heap.push(next as u32, new_cost + h, new_cost);
+                        }
+                    }
+                }
+            }
+
+            // 左
+            if current_x > 0 {
+                let next = current - 1;
+                if blocked[next] == 0 || next == to {
+                    let mut penalty = 0;
+                    if let Some(points) = used_points {
+                        penalty += crossing_penalty(points[current], CONNECT_LEFT);
+                        penalty += crossing_penalty(points[next], CONNECT_RIGHT);
+                    }
+
+                    if is_segment_allowed_relaxed(
+                        current,
+                        next,
+                        /*seg_key=*/ next * 2,
+                        segment_used,
+                        used_as_middle,
+                        start_source,
+                        start_source_multi,
+                        end_target,
+                        end_target_multi,
+                        route_from_idx,
+                        route_to_idx,
+                        edge_from_id,
+                        edge_to_id,
+                        allow_end_segment_reuse,
+                    ) {
+                        let new_cost = current_cost + 1 + penalty;
+                        if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                            self.cost_stamp[next] = stamp;
+                            self.cost_so_far[next] = new_cost;
+                            self.came_from[next] = current_idx_u32 as i32;
+
+                            let next_x = current_x - 1;
+                            let abs_x = if next_x >= to_x {
+                                next_x - to_x
+                            } else {
+                                to_x - next_x
+                            };
+                            let abs_y = if current_y >= to_y {
+                                current_y - to_y
+                            } else {
+                                to_y - current_y
+                            };
+                            let h = abs_x as u32
+                                + abs_y as u32
+                                + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                            self.heap.push(next as u32, new_cost + h, new_cost);
+                        }
+                    }
+                }
+            }
+
+            // 下
+            if current_y < max_y as usize {
+                let next = current + stride;
+                if blocked[next] == 0 || next == to {
+                    let mut penalty = 0;
+                    if let Some(points) = used_points {
+                        penalty += crossing_penalty(points[current], CONNECT_DOWN);
+                        penalty += crossing_penalty(points[next], CONNECT_UP);
+                    }
+
+                    if is_segment_allowed_relaxed(
+                        current,
+                        next,
+                        /*seg_key=*/ current * 2 + 1,
+                        segment_used,
+                        used_as_middle,
+                        start_source,
+                        start_source_multi,
+                        end_target,
+                        end_target_multi,
+                        route_from_idx,
+                        route_to_idx,
+                        edge_from_id,
+                        edge_to_id,
+                        allow_end_segment_reuse,
+                    ) {
+                        let new_cost = current_cost + 1 + penalty;
+                        if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                            self.cost_stamp[next] = stamp;
+                            self.cost_so_far[next] = new_cost;
+                            self.came_from[next] = current_idx_u32 as i32;
+
+                            let next_y = current_y + 1;
+                            let abs_x = if current_x >= to_x {
+                                current_x - to_x
+                            } else {
+                                to_x - current_x
+                            };
+                            let abs_y = if next_y >= to_y {
+                                next_y - to_y
+                            } else {
+                                to_y - next_y
+                            };
+                            let h = abs_x as u32
+                                + abs_y as u32
+                                + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                            self.heap.push(next as u32, new_cost + h, new_cost);
+                        }
+                    }
+                }
+            }
+
+            // 上
+            if current_y > 0 {
+                let next = current - stride;
+                if blocked[next] == 0 || next == to {
+                    let mut penalty = 0;
+                    if let Some(points) = used_points {
+                        penalty += crossing_penalty(points[current], CONNECT_UP);
+                        penalty += crossing_penalty(points[next], CONNECT_DOWN);
+                    }
+
+                    if is_segment_allowed_relaxed(
+                        current,
+                        next,
+                        /*seg_key=*/ next * 2 + 1,
+                        segment_used,
+                        used_as_middle,
+                        start_source,
+                        start_source_multi,
+                        end_target,
+                        end_target_multi,
+                        route_from_idx,
+                        route_to_idx,
+                        edge_from_id,
+                        edge_to_id,
+                        allow_end_segment_reuse,
+                    ) {
+                        let new_cost = current_cost + 1 + penalty;
+                        if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
+                            self.cost_stamp[next] = stamp;
+                            self.cost_so_far[next] = new_cost;
+                            self.came_from[next] = current_idx_u32 as i32;
+
+                            let next_y = current_y - 1;
+                            let abs_x = if current_x >= to_x {
+                                current_x - to_x
+                            } else {
+                                to_x - current_x
+                            };
+                            let abs_y = if next_y >= to_y {
+                                next_y - to_y
+                            } else {
+                                to_y - next_y
+                            };
+                            let h = abs_x as u32
+                                + abs_y as u32
+                                + if abs_x == 0 || abs_y == 0 { 0 } else { 1 };
+                            self.heap.push(next as u32, new_cost + h, new_cost);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// 回溯路径（包含 fromIdx 与 toIdx），与 TS 行为一致。
     fn reconstruct_path(&self, mut current_idx: u32) -> Vec<u32> {
         let mut path: Vec<u32> = Vec::new();
@@ -740,6 +1070,87 @@ fn is_step_allowed_strict(
     }
 
     // 同靶：只允许“终点段”共线，并且该段不能混入起点共享
+    if is_end_step {
+        return !ss_multi && ss == 0 && !et_multi && et == edge_to_id;
+    }
+
+    false
+}
+
+/// relaxed：计算“形成 `┼`（四向交叉）”的惩罚（与 TS 的 `crossingPenalty()` 一致）。
+fn crossing_penalty(from_mask: u8, add_bit: u8) -> u32 {
+    if from_mask == 0 {
+        return 0;
+    }
+    let next_mask = from_mask | add_bit;
+    if (next_mask & H_MASK) == H_MASK && (next_mask & V_MASK) == V_MASK {
+        RELAXED_PENALTY_CROSSING
+    } else {
+        0
+    }
+}
+
+/// relaxed：segment reuse hard rule（禁止共线重叠；仅允许受控的起点/终点段共享）。
+///
+/// 注意：
+/// - 与 strict 不同：relaxed 默认 **禁止终点段复用**（更符合直觉），
+///   只有在 JS 侧进入 fallback（不可达）时才会把 `allow_end_segment_reuse` 打开。
+#[allow(clippy::too_many_arguments)]
+fn is_segment_allowed_relaxed(
+    step_from: usize,
+    step_to: usize,
+    seg_key: usize,
+    segment_used: &[u8],
+    used_as_middle: &[u8],
+    start_source: &[u32],
+    start_source_multi: &[u8],
+    end_target: &[u32],
+    end_target_multi: &[u8],
+    route_from_idx: u32,
+    route_to_idx: u32,
+    edge_from_id: u32,
+    edge_to_id: u32,
+    allow_end_segment_reuse: bool,
+) -> bool {
+    if segment_used[seg_key] == 0 {
+        return true;
+    }
+
+    // 中间段永不允许复用：它必然意味着“合并后再分开”的重叠，读图会崩。
+    if used_as_middle[seg_key] != 0 {
+        return false;
+    }
+
+    let step_from_u32 = step_from as u32;
+    let step_to_u32 = step_to as u32;
+    let is_start_step = step_from_u32 == route_from_idx;
+    let is_end_step = step_to_u32 == route_to_idx;
+
+    // relaxed 默认仍优先“禁止终点段复用”（更符合直觉）。
+    // 只有在 JS 侧进入 fallback（不可达）时，才会打开 allow_end_segment_reuse。
+    if is_end_step && !allow_end_segment_reuse {
+        return false;
+    }
+
+    let ss = start_source[seg_key];
+    let et = end_target[seg_key];
+    let ss_multi = start_source_multi[seg_key] != 0;
+    let et_multi = end_target_multi[seg_key] != 0;
+
+    // 特殊情况：from 与 to 紧挨着时，这一段既是起点段也是终点段。
+    // 我们只允许“同源 + 同靶”的边共享它，避免引入混淆。
+    if is_start_step && is_end_step {
+        let start_ok = !ss_multi && (ss == 0 || ss == edge_from_id);
+        let end_ok = !et_multi && (et == 0 || et == edge_to_id);
+        return start_ok && end_ok;
+    }
+
+    // 同源：只允许“起点段”复用，并且该段不能混入任何 end 复用（避免读图歧义）。
+    if is_start_step {
+        return !et_multi && et == 0 && !ss_multi && ss == edge_from_id;
+    }
+
+    // 同靶：允许“终点段”复用（最后一段；仅 fallback 开启）。
     if is_end_step {
         return !ss_multi && ss == 0 && !et_multi && et == edge_to_id;
     }

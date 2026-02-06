@@ -115,3 +115,40 @@
   - `make install` 端到端通过（tsup build → sync vendor → cargo test → release build → install）✅
 - 额外观察（潜在风险）：
   - `preserve_order_of_definition` 这类包含自环/循环边的案例在当前 bundle 下渲染变慢，导致 golden tests 整体耗时上升（本机观测 70-100s 级别）。
+
+## 2026-02-06 16:12 - 上游 TS bundle 更新后 Unicode golden 过期（`make install` 失败）
+
+- 现象：
+  - 执行 `make install`（内部会跑 `sync-vendor-verify`）时失败。
+  - 报错为 `tests/ascii_testdata.rs` 的 `unicode_testdata_matches_reference` 输出不一致。
+  - 首个暴露的 mismatch 文件为：
+    - `tests/testdata/unicode/ampersand_lhs_and_rhs.txt`
+- 原因：
+  - `sync-vendor-verify` 重建并同步了上游 TS bundle（本次 sha256 为 `b48b9228...`）。
+  - 上游在相关用例的布局/走线细节上有变化, 导致 Unicode 渲染输出变化。
+  - golden 参考输出仍是旧版本, 因此对比失败。
+- 修复：
+  - 使用仓库内置的 `UPDATE_GOLDEN=1` 模式自动更新 Unicode golden:
+    - `UPDATE_GOLDEN=1 cargo test --test ascii_testdata unicode_testdata_matches_reference`
+  - 实际更新了 2 个文件（之前只看到 1 个是因为断言遇到第一个 mismatch 会提前退出）：
+    - `tests/testdata/unicode/ampersand_lhs_and_rhs.txt`
+    - `tests/testdata/unicode/preserve_order_of_definition.txt`
+- 验证：
+  - `cargo test` 全通过 ✅
+  - `make install` 端到端通过 ✅
+
+## 2026-02-06 19:33 - Unicode（默认 relaxed）渲染过慢：补齐 native `__bm_getPathRelaxed`
+
+- 现象：
+  - Unicode golden tests（`unicode_testdata_matches_reference`）在 QuickJS 环境下耗时非常长（本机观测 70-100s）。
+- 原因：
+  - Rust 侧仅注入 `__bm_getPath` / `__bm_getPathStrict`。
+  - 但 Unicode 默认走 TS 的 relaxed 路由（`getPathRelaxed()`），之前没有 native fast path。
+  - 结果：relaxed A* 热循环仍在 QuickJS 解释执行 → 极慢。
+- 修复：
+  - Rust：实现 native relaxed A*（步长 + crossing penalty + segment reuse hard rule），并注入 `globalThis.__bm_getPathRelaxed(...)`。
+  - TS：`getPathRelaxed()` 检测到 `__bm_getPathRelaxed` 时优先走 native。
+  - 同步 vendor：更新 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`。
+- 验证：
+  - `scripts/sync-vendor-bundle.sh` 全通过（含 `cargo test`）。
+  - Unicode golden tests 耗时降到 ~3.6s（本机观测）。

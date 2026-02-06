@@ -1,4 +1,4 @@
-.PHONY: install build release clean sync-vendor sync-vendor-verify
+.PHONY: install build release clean sync-vendor sync-vendor-verify validate-docs
 
 # 安装目标目录
 INSTALL_DIR = /Users/cuiluming/local_doc/l_dev/tool
@@ -43,3 +43,40 @@ sync-vendor:
 # 同步 bundle + 运行 Rust 测试做端到端验证（推荐）
 sync-vendor-verify:
 	./scripts/sync-vendor-bundle.sh --ts-dir "$(TS_REPO_DIR)"
+
+# 批量校验 Markdown 文档中的 Mermaid code fence（```mermaid ... ```）
+#
+# 说明：
+# - 校验范围：README.md + docs/**/*.md
+# - 成功：exit code=0
+# - 失败：exit code=1，并打印具体文件与错误细节（stderr）
+validate-docs:
+	@bash -euo pipefail -c '\
+		cargo build --quiet; \
+		bin="./target/debug/beautiful-mermaid-rs"; \
+		tmp="$$(mktemp)"; \
+		trap "rm -f \"$$tmp\"" EXIT; \
+		echo "开始校验 Markdown Mermaid: README.md + docs/**/*.md"; \
+		echo "使用二进制: $$bin"; \
+		echo ""; \
+		echo "校验: README.md"; \
+		: > "$$tmp"; \
+		if ! "$$bin" --validate-markdown < "README.md" >/dev/null 2> "$$tmp"; then \
+			echo "Mermaid 校验失败: README.md"; \
+			cat "$$tmp"; \
+			exit 1; \
+		fi; \
+		if [ -d "docs" ]; then \
+			while IFS= read -r -d "" file; do \
+				echo "校验: $$file"; \
+				: > "$$tmp"; \
+				if ! "$$bin" --validate-markdown < "$$file" >/dev/null 2> "$$tmp"; then \
+					echo "Mermaid 校验失败: $$file"; \
+					cat "$$tmp"; \
+					exit 1; \
+				fi; \
+			done < <(find docs -type f -name "*.md" -print0); \
+		fi; \
+		echo ""; \
+		echo "全部 Markdown Mermaid 校验通过"; \
+	'

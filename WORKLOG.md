@@ -143,3 +143,59 @@
   - 同步：vendor bundle（`renderMermaidAsciiWithMeta`）
   - 新增：`tests/ascii_meta_smoke.rs`（text 与旧 API 严格一致 + meta 可用）
   - 更新：`README.md`（项目定位 / 上游问题 / 本仓库改动）
+
+## 2026-02-06 16:10 - TS bundle 更新后修复 Unicode golden（恢复 `make install`）
+
+- 背景：`make install` 内部会执行 `sync-vendor-verify` 重建并同步 TS bundle（本次 sha256 为 `b48b9228...`）。
+- 现象：Unicode 渲染布局变化导致 golden 参考输出过期, `cargo test` 在 `unicode_testdata_matches_reference` 失败。
+- 修复：使用 `tests/ascii_testdata.rs` 内置的 `UPDATE_GOLDEN=1` 更新模式, 自动写回当前渲染输出。
+  - 更新了 2 个文件：
+    - `tests/testdata/unicode/ampersand_lhs_and_rhs.txt`
+    - `tests/testdata/unicode/preserve_order_of_definition.txt`
+- 验证：
+  - `cargo test` 全通过。
+  - `make install` 端到端通过（tsup build → sync vendor → cargo test → release build → install）。
+
+## 2026-02-06 16:54 - 集成 Mermaid validator（不依赖 mcp-mermaid-validator）
+
+- 新增公共 API:
+  - `beautiful_mermaid_rs::validate_mermaid(...) -> MermaidValidation`
+  - 后端使用 `selkie::parse` 做严格语法校验（纯 Rust, 不依赖 Node）。
+- 扩展 CLI:
+  - `--validate`: 校验单个 Mermaid（stdin 输入）, stdout 输出 `true/false`, stderr 输出错误细节。
+  - `--validate-markdown`: 扫描 stdin 的 Markdown, 校验其中所有 ```mermaid code fence（stdout 输出 `true/false`）。
+- 新增测试:
+  - `tests/validate_smoke.rs`: 覆盖 valid/invalid 两类输入, 防止 validator 回归失效。
+- 更新文档:
+  - `docs/code-agent-cli.md` 补充 validator 的用法、选项与退出码说明。
+- 验证:
+  - `cargo fmt --all`
+  - `cargo test` 全通过。
+
+## 2026-02-06 17:09 - 增加 `make validate-docs`（批量校验 README/docs Mermaid 图）
+
+- 新增 Makefile target:
+  - `make validate-docs`: 校验 `README.md` 与 `docs/**/*.md` 内的 ```mermaid code fence。
+  - 失败即退出, 并输出具体文件与错误细节（stderr）。
+- 文档同步:
+  - `README.md` 与 `docs/code-agent-cli.md` 增加对应说明与示例。
+- 验证:
+  - `make validate-docs` 通过。
+
+## 2026-02-06 17:15 - validator 文档语义对齐（收尾）
+
+- 修正注释与实际实现一致:
+  - `MermaidValidation` 目前后端为 `selkie::parse`（纯 Rust parser）。
+- 验证:
+  - `cargo test` 全通过。
+  - `make validate-docs` 通过。
+
+## 2026-02-06 19:33 - QuickJS Unicode relaxed 性能优化：native `__bm_getPathRelaxed`
+
+- 做了什么：
+  - Rust：实现 native relaxed A*（步长 + crossing penalty + segment reuse hard rule），并注入 `globalThis.__bm_getPathRelaxed(...)`。
+  - TS bundle：`getPathRelaxed()` 增加 fast path，存在 `__bm_getPathRelaxed` 时优先走 Rust。
+  - 同步 vendor：把最新 bundle 写入 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`。
+- 验证：
+  - `scripts/sync-vendor-bundle.sh` 通过（含 `cargo test`）。
+  - Unicode golden 用例耗时从 ~88s 降到 ~3.6s（本机观测）。
