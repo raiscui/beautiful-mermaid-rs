@@ -289,3 +289,92 @@
   - [x] 同步 vendor bundle 并跑端到端测试确认输出一致。
 - 状态：
   - 已完成：`scripts/sync-vendor-bundle.sh` 通过；Unicode golden 用例耗时降到 ~3.6s。
+
+### 2026-02-06 20:13
+- 现象：渲染下述 Flowchart（Unicode + relaxed）时, 输出读起来像是 `task.start` 指向了 “🔎 规格审阅者”, 线路存在强歧义。
+  - 复现命令：
+    - `printf 'flowchart LR\n  ...\n' | beautiful-mermaid-rs --ascii`
+  - 预期：`task.start` 应该只指向 `ralph#1 (coordinator)`，线路不应与其它边产生“看起来像连接”的梳状合并。
+- 初步判断（先抓本质, 再决定手段）：
+  - 当前 ASCII grid 布局里 “root 节点识别” 依赖 node insertion order。
+  - 当 Mermaid 先声明一堆节点, 再写边时, 很多“其实有入边的节点”会被误判成 root 并堆在同一列。
+  - 这会强迫 `task.start -> ralph` 走一个绕路 + 与其它边近距离贴合的路径, 从而造成肉眼误读。
+- 两种处理路线（先摆出来, 避免直接跳到大重构）：
+  1. **路线A（不惜代价 / 最佳方案）**：把 node 从固定 3x3 block 升级为 NxM 可变尺寸 grid block, 端口沿边框变成多个不同 toIdx, 让 A* 在路由阶段就能区分 lane。
+     - 优点：从根上减少“多边挤同一个端口格子”导致的纠缠, 可读性上限更高。
+     - 缺点：改动面很大（grid 占用、候选端口、native pathfinder、golden 全面变动）, 需要一轮完整回归。
+  2. **路线B（先能用 / 风险可控）**：先修正 root 节点识别为“无入边的节点”, 让布局更接近 Mermaid/人类直觉; 若仍有歧义, 再在 relaxed 路由里补一个“避免中途形成 T junction”的惩罚项。
+     - 优点：改动集中, 更像修 bug 而非推倒重来; 很可能直接消除该例的绕路合并。
+     - 缺点：极端拥挤图仍可能需要 NxM 才能彻底解决。
+- 决定：先落地路线B（root 识别修正 + 回归测试锁定）。如果该例仍然产生歧义, 再评估是否继续推进路线A。
+- 计划：
+  - [ ] 阶段1: 在 TS 源码定位 root 识别逻辑, 写最小复现测试用例
+  - [ ] 阶段2: 修正 root 识别为“无入边节点”, 并跑 TS golden tests
+  - [ ] 阶段3: `scripts/sync-vendor-bundle.sh` 同步 bundle 到 Rust vendor, 修复/更新 Rust golden
+  - [ ] 阶段4: 端到端验证: `cargo test` + 复现命令确认 `task.start` 线路不再误读
+- 状态：**进行中** - 先从 TS 的 `src/ascii/grid.ts` 入手（rootNodes 识别）。
+
+### 2026-02-06 20:47
+- 我正在继续处理 20:13 记录的 Flowchart 线路歧义问题, 因为目前用户例子里 `task.start` 的线路容易被肉眼误读为指向 “🔎 规格审阅者”, 这会直接影响你用终端看 Mermaid 图的可读性与可信度。
+- 当前进展:
+  - TS 侧已完成 relaxed 下 rootNodes 识别修正与放置流程的健壮性改良, 但 TS 测试目前还没全绿。
+  - 我怀疑是 strict 路由被误引入了 corner fallback, 导致 golden/roundtrip 行为发生变化。
+- 接下来要做的事(先修稳再同步 Rust, 避免把不稳定输出带进 vendor):
+  - [ ] 收敛 strict 路由的 corner fallback, 让 TS `bun test` 全通过。
+  - [ ] 重新构建并同步 vendor bundle 到本仓库, 然后 `cargo test` 全量验证。
+  - [ ] 复现用户命令, 目测确认 `task.start -> ralph#1 (coordinator)` 的箭头清晰且不再误读。
+  - [ ] 把根因/修复/验证记录追加到 `WORKLOG.md` 与 `ERRORFIX.md`, 并在 task_plan 里追加阶段勾选更新。
+
+### 2026-02-06 20:56
+- 进度更新(对应 20:13 的 4 个阶段):
+  - [x] 阶段1: 在 TS 源码定位 root 识别逻辑, 写最小复现测试用例
+  - [x] 阶段2: 修正 relaxed root 识别为“无入边节点”, 并跑 TS `bun test` 全绿
+  - [x] 阶段3: `scripts/sync-vendor-bundle.sh` 同步 bundle 到 Rust vendor, 并按需更新 Rust Unicode golden
+  - [x] 阶段4: 端到端验证: `cargo test` + 复现命令确认 `task.start` 线路不再误读
+- 状态：**已完成** - 当前输出中 `task.start` 会直接、清晰地指向 `ralph#1 (coordinator)`。
+
+### 2026-02-06 23:03
+- 现象(新问题, 与上一个“root 误判”同属 Flowchart 可读性问题):
+  - `flowchart TD` + Unicode(relaxed) 下, “🔎 规格审阅者” 右侧出线看起来没有贴到 box 边框, 出现了 box 内部的竖线 `│`/junction, 视觉上像是线从 box 里面长出来。
+- 关键证据(用 TS 的 meta 验证, 不是肉眼猜):
+  - `Hat_spec_reviewer -> Hat_spec_writer (spec.rejected)` 的 edge stroke 有 4 个点落在 reviewer box interior 内部(非边框), 这是错误行为。
+  - reviewer 的 `gridCoord.x`(左边框列)被 `determineLabelLine()` 为了容纳 label “spec.rejected” 扩宽到 15, 进而触发 node box 与 edge port 的坐标系错位。
+- 根因(本质层):
+  - `determineLabelLine()` 当前用“把 chosenLine 的中点列 middleX 扩宽到 lenLabel+2”来给 label 腾空间。
+  - 但 columnWidth 是“整列共享”的全局值, middleX 可能落在某个 node 的 3x3 block 列(甚至是 node 的 gridCoord.x 顶点列)。
+  - 一旦把 node 的顶点列扩宽, `gridToDrawingCoord()` 的“cell center”语义会把 node box 平移到列中央, 但 edge port 仍按 grid 列边界取点, 导致端口落进 box 内部。
+- 两种处理路线(先摆出来, 再选最小风险修复):
+  1. 路线A(更彻底, 影响更大): 改 node box 的放置语义, 从“cell center”改成“cell origin”, 彻底消除列宽变化导致的 node 平移。
+     - 优点: 坐标系更一致, 不怕任何列宽变化。
+     - 缺点: 可能引发大量 golden 变化, 风险偏大。
+  2. 路线B(改良胜过新增, 风险更可控): 保持 node 放置逻辑不动, 只改 `determineLabelLine()` 的“扩宽列选择策略”:
+     - relaxed + Unicode 时, 若 middleX 落在任意 node 的 3x3 block 列, 则在 chosenLine 覆盖的 [minX..maxX] 范围内选一个“非 node block 列”的最近列来扩宽。
+     - 这样 label 仍有空间, 但不会扩宽 node 列, 端口也不会跑进 box 内部。
+- 决定: 先落地路线B, 并新增回归测试锁死“edge stroke 不得进入 node interior”。
+- 计划:
+  - [x] 阶段1: 在 TS 修复 `determineLabelLine()` 的扩宽列选择(仅 relaxed + Unicode), `bun test` 全绿
+  - [x] 阶段2: 新增 TS 回归测试(用 meta 断言 reviewer 内部不再被 edge stroke 命中)
+  - [x] 阶段3: 同步 vendor bundle 到 Rust, 更新必要的 golden, `cargo test` 全绿
+  - [x] 阶段4: 复现命令验证 “规格审阅者” 右侧出线贴边且无 box 内部竖线
+- 状态：**已完成** - `flowchart TD` 下 reviewer 右侧端口已贴边, 不再出现 box 内部竖线/错位端口。
+
+### 2026-02-06 23:15
+- 收尾动机：
+  - 23:03 的修复已经落地并验证, 但需要把“根因/修复/验证”同步写入 `WORKLOG.md` 与 `ERRORFIX.md`, 让后续排查有可追溯记录。
+- 已完成：
+  - [x] 追加记录到 `WORKLOG.md` 与 `ERRORFIX.md`(只追加到文件尾部)。
+  - [x] 本仓库 `cargo test` 再次确认全绿。
+- 状态：**已完成** - Flowchart TD 的“端口不贴边”问题已闭环记录并验证。
+
+### 2026-02-07 00:18
+- 新需求：git 提交（提交本次 Flowchart routing 修复相关改动）。
+- 动机：
+  - 把 vendor bundle + golden + 四文件记录 固化到提交历史里, 避免工作区长期漂移。
+  - 让其他机器或 CI 拉取后可以稳定复现当前输出与测试结论。
+- 计划：
+  - [x] 查看并审阅 staged 变更：`git status` + `git diff --cached --stat`
+  - [x] 检查是否存在 submodule 变更（如有则一并提交）
+  - [x] 确认测试全绿：`cargo test`
+  - [x] 执行提交：`git commit -m 'fix: sync vendor bundle for flowchart routing'`
+  - [x] 提交后确认工作区干净：`git status`
+- 状态：**已完成** - 已提交 `fix: sync vendor bundle for flowchart routing`, 工作区已干净。

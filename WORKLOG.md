@@ -199,3 +199,59 @@
 - 验证：
   - `scripts/sync-vendor-bundle.sh` 通过（含 `cargo test`）。
   - Unicode golden 用例耗时从 ~88s 降到 ~3.6s（本机观测）。
+
+## 2026-02-06 20:56 - 修复 Flowchart 线路强歧义: “先声明节点, 再连线”导致 relaxed root 误判
+
+- 背景：
+  - 复现输入是 flowchart LR, 先声明节点(含 emoji/中文 label), 再写边。
+  - 旧 relaxed 布局会把“其实有入边”的节点误判成 root, 堆到同一列, 迫使 `task.start -> ralph` 大绕路并与其它边贴合, 肉眼容易误读为指向 “🔎 规格审阅者”。
+- 修复策略(改良胜过新增, 先避免 NxM 大重构)：
+  - relaxed: rootNodes 改为“无入边节点”(按 insertion order 稳定排序), 从源头修正布局层级。
+  - strict: 保持旧 root 推断与路由兜底策略, 避免 strict 的 golden/roundtrip 行为漂移。
+- Rust 侧落地：
+  - 已通过 `scripts/sync-vendor-bundle.sh` 同步最新 bundle 到 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`(sha256: `0bc9ef48...`)。
+  - 因为 Unicode 默认 routing=relaxed, 本修复会改变部分 Unicode 输出, 已更新 golden:
+    - `tests/testdata/unicode/preserve_order_of_definition.txt`
+- 验证：
+  - `cargo test` 全通过。
+  - 复现命令(与用户一致)输出第一行已清晰呈现:
+    - `task.start ├────► ralph#1 (coordinator)`
+
+## 2026-02-06 20:59 - 更新本机已安装的 `beautiful-mermaid-rs`
+
+- 执行：
+  - `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool`
+- 验证：
+  - `which beautiful-mermaid-rs` 指向 `/Users/cuiluming/local_doc/l_dev/tool/beautiful-mermaid-rs`。
+  - 直接运行 `printf ... | beautiful-mermaid-rs --ascii` 已能稳定复现“无歧义”的新输出。
+
+## 2026-02-06 23:15 - 修复 Flowchart TD 下 “出线不贴边”(端口落入 box interior)
+
+- 现象：
+  - `flowchart TD` + Unicode(relaxed) 渲染时, “🔎 规格审阅者” 右侧出线看起来没有贴到边框。
+  - 视觉上会出现 box 内部竖线 `│`/junction, 像线从 box 里面长出来。
+- 根因(本质)：
+  - `determineLabelLine()` 为了容纳边 label, 会扩宽 `columnWidth[middleX]`。
+  - 但 `columnWidth` 是“整列共享”的全局宽度, `middleX` 可能落在某个 node 的 3x3 block 列里(甚至是 node 顶点列)。
+  - 一旦扩宽了 node 列, `gridToDrawingCoord()` 的“cell center”语义会把 node box 平移, 但 edge port 仍按 grid 边界取点, 从而造成端口落入 box interior。
+- 修复(改良胜过新增, 先不做 NxM 大重构)：
+  - relaxed + Unicode 时, 如果 `middleX` 命中任意 node block 列, 就在该 labelLine 覆盖的 `[minX..maxX]` 范围内选择“最近的非 node block 列”来扩宽。
+  - 这样 label 仍有空间, 但不会误伤 node 列, 端口也就不会跑进 box 内部。
+- Rust 侧落地：
+  - 同步 vendor bundle 到 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`(sha256: `28c11372...`)。
+- 验证：
+  - `cargo test` 全通过。
+  - 复现命令输出中 reviewer 右侧端口已贴边, 不再出现 box 内部竖线:
+    - `printf 'flowchart TD ...' | beautiful-mermaid-rs --ascii`
+
+## 2026-02-07 00:18 - git 提交（固化 Flowchart routing 修复）
+
+- 已提交：`fix: sync vendor bundle for flowchart routing`
+- 包含变更：
+  - 同步 vendor bundle：更新 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`(sha256: `28c11372...`)。
+  - 更新 golden：`tests/testdata/unicode/preserve_order_of_definition.txt` 对齐最新 Unicode(relaxed) 输出。
+  - 同步记录：`task_plan.md`、`notes.md`、`WORKLOG.md`、`ERRORFIX.md` 追加本次问题的根因/修复/验证结论。
+- 验证：
+  - `cargo test` 全通过。
+  - 复现命令：
+    - `printf 'flowchart TD ...' | beautiful-mermaid-rs --ascii`

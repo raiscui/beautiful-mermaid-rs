@@ -152,3 +152,48 @@
 - 验证：
   - `scripts/sync-vendor-bundle.sh` 全通过（含 `cargo test`）。
   - Unicode golden tests 耗时降到 ~3.6s（本机观测）。
+
+## 2026-02-06 20:56 - Flowchart Unicode relaxed 线路强歧义: `task.start` 易误读为指向 “🔎 规格审阅者”
+
+- 问题：
+  - 输入是 flowchart LR, 先声明节点(含 emoji/中文 label), 再写边。
+  - 旧输出中 `task.start -> ralph#1 (coordinator)` 的线路会被迫绕行并与其它边贴合, 肉眼看起来像指向 “🔎 规格审阅者”。
+- 根因：
+  - relaxed 模式的 grid 布局里, rootNodes 识别依赖 node insertion order 的“首次出现”推断。
+  - 当 Mermaid 先声明节点再连边时, 很多“其实有入边”的节点会被误判为 root 并堆到同一列, 进而强迫边走非常不自然的绕路。
+- 修复：
+  - relaxed: rootNodes 改为“无入边节点”(保持 insertion order 稳定), 并对“全图成环导致 rootNodes 为空”做确定性兜底。
+  - strict: 保持旧 root 推断, 并撤回 strict 的 corner port 兜底, 继续依赖 layoutMargin 重试来获得更多 free cell(避免 strict 输出漂移)。
+  - Rust: 同步 vendor bundle, 并更新受影响的 Unicode golden:
+    - `tests/testdata/unicode/preserve_order_of_definition.txt`
+- 验证：
+  - TS: `bun test` 全通过(559 tests)。
+  - Rust: `cargo test` 全通过。
+  - 复现命令输出已变为“直连且无歧义”, 第一行包含:
+    - `task.start ├────► ralph#1 (coordinator)`
+
+- 部署(避免你本机 PATH 仍指向旧二进制)：
+  - 已执行 `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` 更新已安装的 `beautiful-mermaid-rs`。
+
+## 2026-02-06 23:15 - Flowchart TD 下端口错位: label 扩宽列导致 edge stroke 进入 node interior
+
+- 现象：
+  - `flowchart TD` + Unicode(relaxed) 输出里, “🔎 规格审阅者” 右侧出线不贴边。
+  - 视觉上出现 box 内部竖线 `│`/junction, 像线从 box 里面长出来。
+- 原因：
+  - `determineLabelLine()` 会把 `columnWidth[middleX]` 扩宽到 `lenLabel + 2`。
+  - `columnWidth` 是全局列宽, 当 `middleX` 落在 node 的 3x3 block 列(尤其是 node 顶点列)时,
+    - node box 会因 “cell center” 的坐标语义发生平移,
+    - 但 edge port 仍按 grid 边界取点,
+    - 于是端口与 box 边框错位, edge stroke 会进入 node interior。
+- 修复：
+  - relaxed + Unicode 时:
+    - 若 `middleX` 命中任意 node block 列, 则在该 labelLine 覆盖的 `[minX..maxX]` 里选择“最近的非 node block 列”来扩宽,
+    - 避免扩宽 node 列, 从而避免端口落入 box interior。
+  - 新增 TS 回归测试(使用 meta 断言 edge stroke 不得命中 node interior)来锁死该行为。
+  - Rust 同步最新 vendor bundle 到 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`(sha256: `28c11372...`)。
+- 验证：
+  - Rust: `cargo test` 全通过 ✅
+  - 复现命令:
+    - `printf 'flowchart TD ...' | beautiful-mermaid-rs --ascii`
+    - reviewer 右侧出线贴边, 不再出现 box 内部竖线 ✅
