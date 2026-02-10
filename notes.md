@@ -817,3 +817,86 @@
 
 #### 修复方向
 - 同组标签共享 `anchorCenterX`(中位数中心),再交给 `verticalOnlyStack` 做 y 轴避让。
+
+### 2026-02-10 02:23:00 - 短引导符增强设计与取舍
+
+#### 目标
+- 在并线标签已纵向堆叠的基础上,进一步回答“这是哪条线的注释”。
+
+#### 实现要点
+- `drawTextOnLine()` 改为返回最终落位 `LabelPlacement`。
+- 在 Unicode relaxed 的 bundle 标签路径里:
+  - 使用“原始 labelLine 中心”作为目标点;
+  - 在标签旁绘制 1 格短引导符(优先目标侧,次选上下)。
+
+#### 取舍
+- 只写入空白格,不覆盖已有线段/junction 字符。
+- 引导符长度固定为 1 格,避免把图再次画乱。
+
+### 2026-02-10 19:31:40 - 并线标签二次优化(纵向化收口)观察记录
+
+#### 复现结论
+- 用户复现图里,`integration.blocked / integration.rejected / experiment.complete` 的歧义核心不是“路由错”,而是“标签侧向噪音 + 横向视觉漂移”。
+- 第一版短引导符会在文字同一行追加 `─/-`,造成“左右两侧都有突刺”,阅读时容易误判注释归属。
+
+#### 方案对比
+1. 尝试方案A(已回退): 按真实 `labelLine` 的偏好 y 重排整组标签
+   - 优点: 理论上更贴近各线段高度。
+   - 缺点: 在该用户图会把标签压到右侧区域,可读性变差。
+2. 最终方案B(采纳): 保留原 rank 纵向栈,但做两点约束
+   - 引导符只保留“纵向 1 格”,彻底移除左右 `─/-`。
+   - 同组标签共享 `anchorStartX`,让所有标签左边界一致。
+
+#### 最终效果
+- 同组并线标签保持严格上下堆叠。
+- 标签不再出现左右拼接噪音。
+- 通过纵向短引导符保留最小关联提示。
+
+### 2026-02-10 20:26:52 - 近侧走线优化实证结论
+
+#### 现象与根因
+- 用户反馈“有些线明明左侧更近却绕路”。
+- 直接复现后确认: `Hat_experiment_integrator -> Hat_ralph` 多条边存在端口与路由选择偏置。
+- 核心根因是 relaxed 决策链里的早收敛:
+  - `baseFast` 或 `expandedStart` 先命中后,`expandedAll` 候选在部分场景没有足够机会参与。
+
+#### 本轮有效改动
+1. `tryPickRelaxed()`
+   - 增加坏味道探测条件(侧穿/错轴/偏长),在坏味道场景下主动探测 `expandedAll`。
+   - 对并线场景(同 from->to + Unicode)优先尝试 end reuse。
+2. `nearestSidePenaltyRelaxed()`
+   - 增加“近轴对穿”额外惩罚,抑制显著反直觉的左右/上下对穿。
+3. `detourPenaltyRelaxed()`
+   - 增加方向性过冲惩罚,用于压制“朝目标方向继续外绕”的路径。
+
+#### 结果
+- 关键边端口已切到左侧近边:
+  - `Hat_experiment_integrator -> Hat_ralph (experiment.complete / integration.applied / integration.blocked / integration.rejected)`
+  - meta 末端点从右侧(`x=30`)变为左侧(`x=4`)。
+- 代价与取舍:
+  - 在该复现图上,并线约束与避交叉约束叠加后,路径长度上升(对应断言阈值调整)。
+
+#### 额外调试能力
+- `examples/debug_user_case_meta.rs` 新增边级 `len` 与 `bbox` 输出,便于后续排查“看起来绕路但不知哪条边”的问题。
+
+### 2026-02-10 22:56:39 - 纯近路优先策略回收结果
+
+#### 用户澄清
+- 需求不是“左侧优先”或“右侧优先”。
+- 需求是“纯近路优先,上下左右都可以”。
+
+#### 本轮关键调整
+1. 回收方向偏置
+- `nearestSidePenaltyRelaxed()` 仅保留中等强度背向惩罚(`AWAY_PENALTY=180`)。
+- 删除轴向偏置、对穿偏置等方向性附加项。
+2. 回收方向过冲偏置
+- `detourPenaltyRelaxed()` 恢复为方向无关的总 detour 惩罚。
+3. 候选探测改为路径质量触发
+- `shouldProbeExpandedAllFast()` 触发条件改为“长路径/多拐点/大 detour”,不再依赖方向主导判断。
+4. reuse 比较统一为成本最小
+- `pickRelaxedWithEndReuseComparison()` 回收为 `pickBetter()` 结果。
+- 取消同端点并线的定向优先分支。
+
+#### 验证观察
+- 关键边不再被强制导向固定侧。
+- 路由结果由整体成本主导,符合“纯近路优先”目标。

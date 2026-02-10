@@ -98,9 +98,26 @@ Hat_ralph -->|integration.task| Hat_experiment_integrator
             .map(|b| is_adjacent_to_box(b, last))
             .unwrap_or(false);
 
+        // =====================================================================
+        // 统计路径长度与包围盒,用于定位“绕远/外框”问题
+        // =====================================================================
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        for point in &edge.path {
+            min_x = min_x.min(point.x);
+            max_x = max_x.max(point.x);
+            min_y = min_y.min(point.y);
+            max_y = max_y.max(point.y);
+        }
+
         eprintln!(
-            "  - {} -> {} ({}) first={first:?} last={last:?} target_adjacent={adjacent}",
-            edge.from, edge.to, edge.label
+            "  - {} -> {} ({}) len={} bbox=({min_x},{min_y})-({max_x},{max_y}) first={first:?} last={last:?} target_adjacent={adjacent}",
+            edge.from,
+            edge.to,
+            edge.label,
+            edge.path.len()
         );
     }
 }

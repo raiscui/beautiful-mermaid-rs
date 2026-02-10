@@ -836,3 +836,125 @@
 - `cargo test --test ascii_testdata --quiet` ✅
 - `cargo test --quiet` ✅
 - `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+### 2026-02-10 02:24:00 - 新增并线标签短引导符,增强“标签-线路”对应关系
+
+#### 代码改动
+- 上游 TS:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/draw.ts`
+    - `drawTextOnLine()` 返回 `LabelPlacement | null`。
+    - 新增 `drawShortBundleLabelLeader()`:
+      - 根据标签落点与原始 labelLine 中心,绘制 1 格引导符。
+      - 优先目标侧水平符号,不可用时退化到上下符号。
+    - `drawGraph()` 的 Unicode relaxed bundle 路径:
+      - 在标签写入后追加短引导符。
+
+#### 同步与产物
+- `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+- `tests/testdata/unicode/user_repro_case.txt`
+
+#### 验证
+- `cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet` ✅
+- `cargo test --quiet` ✅
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+#### 结果
+- `experiment.complete/integration.applied/integration.blocked/integration.rejected` 在同列纵向堆叠基础上,新增短引导标记,
+  更容易看出标签与附近线路的对应关系。
+
+### 2026-02-10 19:32:05 - 并线标签收口优化完成(继续任务)
+
+#### 本轮目标
+- 继续优化用户复现图中并线标签的可读性。
+- 满足硬约束: 并线标签仅上下堆叠,不再出现左右拼接样式。
+
+#### 代码与产物
+- 修改上游 TS:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/draw.ts`
+    1. `drawShortBundleLabelLeader()` 改为仅纵向引导符。
+    2. `buildBundleStackedLabelLines()` 增加同组 `anchorStartX` 统一起始列。
+- 同步到 Rust vendor:
+  - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+- 更新 golden:
+  - `tests/testdata/unicode/user_repro_case.txt`
+
+#### 验证命令
+- `UPDATE_GOLDEN=1 cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet`
+- `cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet`
+- `cargo test --quiet`
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool`
+- `/Users/cuiluming/local_doc/l_dev/tool/beautiful-mermaid-rs --ascii < /tmp/user_repro_case.mmd`
+
+#### 验证结果
+- 所有正式测试通过。
+- 安装后的 CLI 复现确认通过。
+- 并线标签呈纵向列表,且不再出现左右 `─/-` 拼接噪音。
+
+### 2026-02-10 20:26:52 - 继续优化完成: 近侧走线优先(左侧端口)落地
+
+#### 用户目标
+- 继续优化路由。
+- 重点解决“明明左边近却没有走左边”的问题。
+
+#### 代码改动
+1. 上游 TS 路由核心:
+   - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/edge-routing.ts`
+     - `tryPickRelaxed()`:
+       - 坏味道场景补充 `expandedAll` 探测。
+       - 同端点并线 + Unicode 场景优先 end reuse。
+     - `nearestSidePenaltyRelaxed()`:
+       - 增加近轴对穿惩罚。
+     - `detourPenaltyRelaxed()`:
+       - 增加方向过冲惩罚。
+2. 调试工具增强:
+   - `examples/debug_user_case_meta.rs`
+     - 新增 `len` / `bbox` 输出。
+3. Rust 仓库同步:
+   - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+   - `tests/testdata/unicode/user_repro_case.txt`
+   - `tests/ascii_user_case_edge_endpoint_invariants.rs` (阈值与注释同步)
+
+#### 验证命令
+- `cargo test --test ascii_user_case_edge_endpoint_invariants user_repro_case_all_edges_respect_endpoint_invariants --quiet`
+- `cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet`
+- `cargo test --quiet`
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool`
+- `/Users/cuiluming/local_doc/l_dev/tool/beautiful-mermaid-rs --ascii < /tmp/user_repro_case.mmd`
+
+#### 验证结果
+- 所有测试通过。
+- 安装验证通过。
+- 关键并线边已从目标左侧进入 `Hat_ralph`。
+
+### 2026-02-10 22:56:39 - 修正为“纯近路优先”并完成回归
+
+#### 目标
+- 按用户澄清,将策略从“侧向偏好”改为“纯近路优先”。
+
+#### 代码改动
+- `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/edge-routing.ts`
+  1. `detourPenaltyRelaxed()`
+     - 移除方向过冲惩罚,保持方向无关。
+  2. `nearestSidePenaltyRelaxed()`
+     - 保留中等强度背向惩罚,移除轴向/对穿偏置。
+  3. `tryPickRelaxed()`
+     - `shouldProbeExpandedAllFast()` 改为路径质量触发逻辑。
+  4. `pickRelaxedWithEndReuseComparison()`
+     - 回收为纯成本比较。
+  5. 移除同端点并线的定向优先分支。
+
+- 同步与测试文件:
+  - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+  - `tests/testdata/unicode/user_repro_case.txt`
+  - `tests/ascii_user_case_edge_endpoint_invariants.rs`
+
+#### 验证命令
+- `cargo test --test ascii_user_case_edge_endpoint_invariants user_repro_case_all_edges_respect_endpoint_invariants --quiet`
+- `cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet`
+- `cargo test --quiet`
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool`
+
+#### 结果
+- 全部测试通过。
+- 安装版已更新。
+- 路由行为满足“纯近路优先,不固定偏左/偏右”。

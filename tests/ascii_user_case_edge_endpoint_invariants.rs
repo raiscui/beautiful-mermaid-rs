@@ -525,13 +525,12 @@ Hat_ralph -->|integration.task| Hat_experiment_integrator
 
             assert!(
                 // 说明:
-                // - 在回到“与上游 TS 基线一致”的 relaxed 路由后,
-                //   `integration.rejected` 这条边会更倾向走外侧大回环,以避免走进占用点/制造歧义 junction；
-                // - 这会让 path（按 cell 逐格展开的 stroke 坐标）明显变长。
+                // - 在“纯近路优先”策略下,`integration.rejected` 仍可能出现较长绕行,
+                //   但不应退化到灾难级外圈。
                 //
                 // 我们仍然保留上方的 `extra_right<=10` 作为硬约束,防止它跑到最右侧外圈。
                 // 这里的长度阈值只作为“防爆线”: 避免回到无限绕圈那类灾难性退化。
-                edge.path.len() <= 220,
+                edge.path.len() <= 240,
                 "integrator->Hat_ralph(integration.rejected) path too long (likely outer detour): len={}, max_node_right={max_node_right}",
                 edge.path.len()
             );

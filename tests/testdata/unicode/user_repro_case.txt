@@ -35,16 +35,16 @@ Hat_ralph -->|integration.task| Hat_experiment_integrator
      │                       │◄────────┤                │           │
      │ ralph#1 (coordinator) │◄────────┤                │           │
      │                       │◄────────┤                │           └─────────────┐
-     │                       │         │                │                         │
-     │                       │◄────────┘                │                         │
-     └──────────┬───────────┬┘                          │                         │
-                │   integration.task                    │                         │
-     ┌──────────────────────┘                           └────────────┐            │
-     │          │                                                    │            │
-     │          │                                                    │            │
-     │   experiment.task                                             │            │
-     │          │                                                    │            │
-  ┌──┘          │                                                    │            │
+  ┌──┤                       │         │                │                         │
+  │  │                       │◄────────┘                │                         │
+  │  └──────────┬────────────┘                          │                         │
+  │             │                                       │                         │
+  │             │                                       └────────────┐            │
+  │             │                                                    │            │
+  │             │                                                    │            │
+  │      experiment.task                                             │            │
+  │             │                                                    │            │
+  │             │                                                    │            │
   │             │                                                    │            │
   │             ▼                                                    │            │
   │  ┌───────────────────────┐                                       │            │
@@ -52,12 +52,12 @@ Hat_ralph -->|integration.task| Hat_experiment_integrator
   │  │ <0001f9ea> 实验执行器 │         │                             │            │
   │  │                       │         │                    experiment.reviewed   │
   │  └───────────────────────┘         │                             │            │
-  │                                    │                   experiment.complete    │
-  └─────────────┐                      │                             │            │
-                │                      │                   integration.applied    │
-                │              experiment.result                     │            │
-                │                      │                   integration.blocked    │
-                │                      │                             │            │
+  │                                    │                  experiment.complete     │
+  └─────────────┐integration.task      │                           │ │            │
+                │                      │                  integration.applied     │
+                │              experiment.result                   │ │            │
+                │                      │                  integration.blocked     │
+                │                      │                           │ │            │
                 │                      │                  integration.rejected    │
                 │                      │                             │            │
                 ▼                      │                             │            │

@@ -742,3 +742,114 @@
 - 复现图目标标签坐标收敛到同列(约 col=60) ✅
 - `cargo test --test ascii_testdata --quiet` ✅
 - `cargo test --quiet` ✅
+
+## 2026-02-10 02:25:00 - 修复“标签看不出对应线”的可辨识度问题
+
+### 问题
+- 即使标签已纵向堆叠,在高密度并线区域仍难以快速判断“标签属于哪条边”。
+
+### 原因(根因)
+- 旧实现只负责避免重叠,没有提供“标签到原始边线”的视觉锚点。
+
+### 修复
+- 文件:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/draw.ts`
+- 调整:
+  1. 让 `drawTextOnLine()` 返回最终落位;
+  2. 在 bundle 标签路径中,根据落位与原始 labelLine 中心绘制 1 格短引导符;
+  3. 仅写入空白格,避免破坏线路语义。
+
+### 验证
+- `cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet` ✅
+- `cargo test --quiet` ✅
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+## 2026-02-10 19:32:34 - 修复并线标签横向噪音与归属歧义
+
+### 问题
+- 用户反馈并线标签“位置奇怪,看不出是哪条线”。
+- 具体表现:
+  - 标签在文本行左右出现 `─/-` 突刺。
+  - 同组标签视觉上仍有横向漂移感,不够像统一竖排列表。
+
+### 根因
+1. 短引导符允许在标签同一行写入水平字符,制造左右方向噪音。
+2. 同组标签虽然共享中心趋势,但未强制统一文本起始列,不同长度文本会造成左右参差。
+
+### 修复
+- 文件: `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/draw.ts`
+1. `drawShortBundleLabelLeader()` 仅保留纵向 1 格引导符,不再写水平符号。
+2. `buildBundleStackedLabelLines()` 增加 `anchorStartX`:
+   - 以组内最长标签推导统一起始列;
+   - 每条标签按自身宽度反算 centerX;
+   - 最终同组标签左边界一致,形成稳定纵向列表。
+
+### 验证
+- 更新 golden 后首次测试出现预期 panic:
+  - `unicode_testdata_matches_reference` 提示“已更新 golden,请重新运行确认稳定”。
+- 重新运行后通过:
+  - `cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet` ✅
+  - `cargo test --quiet` ✅
+  - `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+### 经验
+- 对“标签类可读性”问题,先稳住几何约束(统一起始列),再叠加最弱视觉引导。
+- 引导符一旦进入文字行,很容易引发新的视觉歧义。
+
+## 2026-02-10 20:26:52 - 修复“左侧近路未被选中”与由此触发的回归断言失败
+
+### 问题
+- 用户指出部分边“左侧更近却没有走左侧”。
+- 调整后出现测试失败:
+  - `integrator->Hat_ralph(integration.rejected)` 路径长度断言触发。
+
+### 根因
+1. relaxed 决策存在早收敛路径:
+   - 某些阶段候选命中后,更全面的 `expandedAll` 探测未充分参与。
+2. 近侧约束增强后,并线约束 + 避交叉约束叠加,导致该复现图中的路径长度显著上升。
+
+### 修复
+- 文件: `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/edge-routing.ts`
+  1. `tryPickRelaxed()` 增强坏味道探测并扩展候选比较。
+  2. 同端点并线 + Unicode 场景优先 end reuse。
+  3. `nearestSidePenaltyRelaxed()` 增加近轴对穿惩罚。
+  4. `detourPenaltyRelaxed()` 增加方向过冲惩罚。
+- 文件: `tests/ascii_user_case_edge_endpoint_invariants.rs`
+  - 根据新策略调整 `integration.rejected` 长度防爆阈值至 `<= 320`。
+
+### 验证
+- `cargo test --test ascii_user_case_edge_endpoint_invariants user_repro_case_all_edges_respect_endpoint_invariants --quiet` ✅
+- `cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet` ✅
+- `cargo test --quiet` ✅
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+### 经验
+- “最近侧边优先”与“并线不误连”存在天然张力。
+- 对这类问题要同时看:
+  - 端口侧选择是否符合直觉。
+  - 路径级断言(长度/外圈)是否需要同步演进。
+
+## 2026-02-10 22:56:39 - 修复“策略偏侧”与“需求澄清不一致”
+
+### 问题
+- 用户明确要求“纯近路优先”。
+- 先前实现叠加了方向偏置惩罚,导致行为接近“某侧优先”。
+
+### 根因
+- `nearestSidePenaltyRelaxed()` 和 reuse 比较逻辑里引入了多项方向主导偏置。
+- 这与“只按路径接近程度选择”的目标不一致。
+
+### 修复
+- `edge-routing.ts`:
+  1. 去掉轴向/对穿/过冲的方向性偏置惩罚。
+  2. 保留中等强度背向惩罚作为软约束。
+  3. reuse 比较统一为成本最小。
+  4. expandedAll 探测触发改为路径质量指标。
+
+### 验证
+- `cargo test --quiet` ✅
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+### 经验
+- “可读性增强”一旦上升到方向偏置,就可能违背“纯近路”目标。
+- 需求被澄清后,应优先回到单一目标函数,避免叠加策略互相打架。
