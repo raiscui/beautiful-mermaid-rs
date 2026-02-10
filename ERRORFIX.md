@@ -669,3 +669,76 @@
 ### 验证
 - `bun test src/__tests__/unicode-relaxed-comb-ports-star.test.ts` ✅
 - `cargo test` ✅
+
+## 2026-02-10 00:57:00 - 修复 relaxed 终点复用策略的顺序偏置问题
+
+### 问题
+- 在 Unicode relaxed 下,`allowEndSegmentReuse` 的策略选择是“先试先返回”。
+- 该短路机制会导致某些可读性更好的候选被顺序掩盖,表现为路径稳定落在非直觉侧边。
+
+### 原因(根因)
+- 逻辑结构是:
+  - `tryPickRelaxed(true) ?? tryPickRelaxed(false)` 或反向顺序。
+- 只要第一种策略找到可行路径,第二种策略即使更优也不会参与比较。
+
+### 修复
+- 文件:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/edge-routing.ts`
+- 方案:
+  1. 两种策略都执行一次求解;
+  2. 使用统一质量比较器进行选择;
+  3. 在 Unicode relaxed + 垂直主导场景下,增加“对穿抑制”的窄范围决策条件(仅在略差时允许切换)。
+
+### 验证
+- `cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet` ✅
+- `cargo test --test ascii_user_case_edge_endpoint_invariants --quiet` ✅
+- `cargo test --quiet` ✅
+- 复现命令:
+  - `printf 'flowchart TD ...' | cargo run --quiet -- --ascii` ✅ 可正常渲染。
+
+## 2026-02-10 01:33:00 - 修复并线标签横向漂移导致的左右拼接
+
+### 问题
+- 并线标签已分组,但落字阶段仍会横向搜索 `startX`。
+- 实际表现为同一并线区域标签左右排开,阅读噪声高。
+
+### 原因(根因)
+- `buildBundleStackedLabelLines()` 只负责给出分层后的 `line`。
+- `drawTextOnLine()` 默认避让策略优先在同一行做 x 方向搜索,
+  从而覆盖了“纵向堆叠”的意图。
+
+### 修复
+- 文件:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/draw.ts`
+- 调整:
+  1. 增加 `verticalOnlyStack` 选项;
+  2. 并线标签启用该选项后,固定中心 x;
+  3. 冲突时只做 y 方向上下搜索,禁止横向扩散。
+
+### 验证
+- `cargo test --test ascii_user_case_edge_endpoint_invariants --quiet` ✅
+- `cargo test --test ascii_testdata --quiet` ✅
+- `cargo test --quiet` ✅
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+## 2026-02-10 01:54:00 - 修复并线标签“只共享 y 不共享 x”导致的横向离散
+
+### 问题
+- 并线标签虽然做了 rank 分层,但视觉上仍然左右散开。
+
+### 原因(根因)
+- 旧逻辑仅共享 `anchorY`,每条标签保留自己的 `middleX`。
+- 这会让同组标签仍然按不同 x 中心落字,无法形成统一纵向列。
+
+### 修复
+- 文件:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/draw.ts`
+- 调整:
+  1. 计算组内 `anchorCenterX`(中位数);
+  2. 组内标签线统一使用该 x;
+  3. 结合 `verticalOnlyStack`,只允许 y 方向避让。
+
+### 验证
+- 复现图目标标签坐标收敛到同列(约 col=60) ✅
+- `cargo test --test ascii_testdata --quiet` ✅
+- `cargo test --quiet` ✅

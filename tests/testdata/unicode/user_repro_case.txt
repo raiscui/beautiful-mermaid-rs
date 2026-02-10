@@ -52,11 +52,11 @@ Hat_ralph -->|integration.task| Hat_experiment_integrator
   │  │ <0001f9ea> 实验执行器 │         │                             │            │
   │  │                       │         │                    experiment.reviewed   │
   │  └───────────────────────┘         │                             │            │
-  │        experiment.complete         │                             │            │
+  │                                    │                   experiment.complete    │
   └─────────────┐                      │                             │            │
-                │                      │           integration.applied            │
+                │                      │                   integration.applied    │
                 │              experiment.result                     │            │
-                │                      │                        integration.blocked
+                │                      │                   integration.blocked    │
                 │                      │                             │            │
                 │                      │                  integration.rejected    │
                 │                      │                             │            │

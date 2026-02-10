@@ -752,3 +752,87 @@
 - `cargo test --test ascii_testdata` ✅
 - `cargo test` ✅
 - `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+### 2026-02-10 00:56:00 - 继续优化: 终点复用策略由“顺序短路”改为“质量对比”
+
+#### 变更内容
+- 上游 TS:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/edge-routing.ts`
+    - 新增 `isHorizontalCrossSide()` 用于识别“左右对穿”候选。
+    - 新增 `pickRelaxedWithEndReuseComparison()`:
+      - 同时对比 `allowEndSegmentReuse=false/true` 两个结果。
+      - 在 Unicode relaxed + 垂直主导下,允许“非复用但略差”的非对穿路径胜出。
+    - 路由主流程改为:
+      - `pickedWithoutReuse = tryPickRelaxed(false)`
+      - `pickedWithReuse = tryPickRelaxed(true)`
+      - `picked = pickRelaxedWithEndReuseComparison(...)`
+
+#### 同步与产物
+- 同步 vendor:
+  - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+- golden 更新:
+  - `tests/testdata/unicode/backlink_from_top.txt`
+
+#### 验证
+- `cargo test --test ascii_testdata unicode_testdata_matches_reference --quiet` ✅
+- `cargo test --test ascii_user_case_edge_endpoint_invariants --quiet` ✅
+- `cargo test --quiet` ✅
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+#### 结果
+- 修复了“复用策略顺序偏置”这一算法问题。
+- 用户复现图在不引入新外框回归的前提下保持稳定,并为后续近侧优先改良提供更可靠的决策基线。
+
+### 2026-02-10 01:32:00 - 完成: 并线标签强制上下堆叠(禁止左右拼接)
+
+#### 代码实现
+- 上游 TS:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/draw.ts`
+    - 新增 `DrawTextOnLineOptions.verticalOnlyStack`。
+    - `drawTextOnLine()` 在 `baseCanvasForAvoid` 分支支持“仅纵向避让”:
+      - 固定中心 x;
+      - 仅上下找可用 y;
+      - 不再做横向 startX 漂移。
+    - `drawGraph()` Unicode relaxed 顺序标签阶段:
+      - 对 bundle 分组标签传入 `verticalOnlyStack=true`。
+
+#### 同步
+- 同步 vendor:
+  - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+- 已安装到:
+  - `/Users/cuiluming/local_doc/l_dev/tool/beautiful-mermaid-rs`
+
+#### 验证
+- `cargo test --test ascii_user_case_edge_endpoint_invariants --quiet` ✅
+- `cargo test --test ascii_testdata --quiet` ✅
+- `cargo test --quiet` ✅
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅
+
+#### 结果
+- 并线标签不再通过横向位移来避让,冲突处理改为上下层叠。
+- 与用户规则对齐: “并线注释上下排列,不要左右排列”。
+
+### 2026-02-10 01:53:00 - 二次修复: 同组标签统一中心 x,彻底收敛为纵向列
+
+#### 代码改动
+- 上游 TS:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/draw.ts`
+    - 在 `buildBundleStackedLabelLines()` 中新增 `anchorCenterX` 计算:
+      - 取同组 `baseLine` 中心点的中位数。
+    - 组内每条标签线统一改为:
+      - `[{x: anchorCenterX, y: stackedY}, {x: anchorCenterX, y: stackedY}]`
+    - 配合 `verticalOnlyStack` 后,实现“同列上下堆叠”。
+
+#### 效果
+- 用户复现图关键标签坐标:
+  - `experiment.complete`: row=42, col=60
+  - `integration.applied`: row=44, col=60
+  - `integration.blocked`: row=46, col=60
+  - `integration.rejected`: row=48, col=59
+- 已从“横向散开”收敛为“同列纵向栈”。
+
+#### 验证
+- `cargo test --test ascii_user_case_edge_endpoint_invariants --quiet` ✅
+- `cargo test --test ascii_testdata --quiet` ✅
+- `cargo test --quiet` ✅
+- `make install INSTALL_DIR=/Users/cuiluming/local_doc/l_dev/tool` ✅

@@ -753,3 +753,67 @@
   - `cargo test` 全量 ✅
 - Golden 更新:
   - `tests/testdata/unicode/user_repro_case.txt`
+
+### 2026-02-10 00:55:00 - “左侧更近却没走左侧”二次诊断结论
+
+#### 复现与证据
+- 在 TS 上游用调试脚本复现(`bun /tmp/bm_grid.ts`):
+  - `Hat_experiment_integrator -> Hat_ralph` 的 4 条平行边稳定选中 `start=(0,1), end=(2,1)`(左出右入)。
+- 临时候选打印显示:
+  - 并非“左入候选完全不存在”。
+  - 左入候选在当前图下通常需要更长 detour(会绕到更外层),因此被成本函数压过。
+
+#### 根因拆分
+- 这类问题是“几何可达性 + 共享约束 + 策略顺序偏置”的叠加:
+  1. `allowEndSegmentReuse=true/false` 两种策略在同一条边上会得到不同拓扑。
+  2. 旧逻辑是“先试一种策略,只要有解就提前返回”,存在顺序偏置。
+  3. 在垂直主导场景中,顺序偏置会放大“左右对穿”路径的稳定性。
+
+#### 本轮改良(稳态)
+- 上游 TS: `src/ascii/edge-routing.ts`
+  - 保留原有两种 relaxed 策略求解(`allowEndSegmentReuse=false/true`)。
+  - 从“顺序短路”改为“先分别求解,再比较质量”。
+  - 在 Unicode relaxed + 垂直主导场景下新增窄范围决策:
+    - 若复用方案是“左右对穿”,且非复用方案能消除对穿并且成本/长度仅略差,
+      则优先非复用。
+
+#### 为什么仍可能不是“走左边”
+- 当“左入”需要显著更长路径时(明显更差),新规则会维持当前路径。
+- 这属于有意设计: 避免为了“强行左入”制造更大的外框绕行。
+
+#### 影响面评估
+- 仅影响 Unicode relaxed 的窄场景。
+- ASCII/strict 不受影响。
+- golden 漂移仅 1 个用例(`backlink_from_top.txt`)。
+
+### 2026-02-10 01:31:00 - 并线标签“禁止左右拼接”根因与方案
+
+#### 根因
+- 当前 bundle 标签虽然先做了 `anchorY + rank` 纵向分层,
+  但真正落字时仍走 `drawTextOnLine()` 的通用避让:
+  - 会在同一 `y` 上做 `startX` 最近可行搜索;
+  - 于是并线标签会被横向平移,出现左右排开。
+
+#### 改良策略
+- 对“并线标签”(bundle 分组标签)启用专门模式:
+  - 固定中心 `x`(仅做边界 clamp);
+  - 冲突时只做 `y` 方向上下搜索;
+  - Unicode relaxed 下若无合法位则不绘制,避免文字拼接。
+
+#### 影响面
+- 只在 Unicode relaxed + bundle 标签路径启用。
+- ASCII/strict 与非 bundle 标签保持原行为。
+
+### 2026-02-10 01:52:00 - 并线标签仍分散的二次根因
+
+#### 现象复盘
+- 即使开启 `verticalOnlyStack`, `integration.applied/blocked/rejected/experiment.complete` 仍出现横向分散。
+
+#### 根因
+- 纵向堆叠只共享了 `anchorY`,但没有共享 `x`:
+  - `buildBundleStackedLabelLines()` 仍按每条边自己的 `baseLine(minX,maxX)` 生成 line;
+  - `drawTextOnLine()` 以该 line 的 `middleX` 作为落字中心;
+  - 结果是同组标签有不同中心 x,表现为左右离散。
+
+#### 修复方向
+- 同组标签共享 `anchorCenterX`(中位数中心),再交给 `verticalOnlyStack` 做 y 轴避让。
