@@ -197,3 +197,475 @@
   - 复现命令:
     - `printf 'flowchart TD ...' | beautiful-mermaid-rs --ascii`
     - reviewer 右侧出线贴边, 不再出现 box 内部竖线 ✅
+
+## 2026-02-08 02:34:27 - Flowchart TD 箭头未贴边(输出偏移)
+
+### 问题
+- 在 `flowchart TD` + `--ascii` 下,若目标端口列被扩宽,箭头会停在远离目标 box 的位置。
+- 用户感知为“箭头没有接在 box 上”。
+
+### 根因
+- `drawArrowHead` 使用末段 `lastPos` 直接落箭头。
+- 当 label 逻辑扩宽了目标端口列后,`lastPos` 可能远离 box 边框。
+- `drawBox` 本体不使用该扩宽列,导致“box 不动,箭头漂移”。
+
+### 修复
+- 在绘制层引入“目标 box 邻接锚定”:
+  - 箭头头部统一锚到目标 box 外侧一格。
+  - 若与旧末端有间距,补桥接线。
+- 同步修复 meta 与 label 避让中的箭头坐标,保持数据一致性。
+
+### 验证
+- TS 关键回归通过(5/5 pass)。
+- Rust 全量 `cargo test` 通过。
+- 新增 Rust 回归测试 `tests/ascii_endpoint_alignment.rs` 验证“指向 Hat_ralph 的边终点必须邻接 box”。
+- 用户复现命令验证通过: `beautiful-mermaid-rs --ascii < /tmp/repro_user_case.mmd`。
+
+### 经验
+- 端口相关视觉 bug,优先校验“路由层 path”与“绘制层落点语义”是否一致。
+- 避免直接改路由策略,先考虑绘制层最小修复,可以更稳定地控制回归面。
+
+## 2026-02-08 03:09:16 - 二次修复: source 端口仍悬空
+
+### 问题
+- 第一轮修复后, target 箭头已贴边,但 source 出边仍可能悬空。
+
+### 原因
+- source 侧 `drawBoxStart` 没有与新的“box 邻接锚定”语义对齐。
+- 导致“终点修好了,起点还在漂移”。
+
+### 修复
+- source marker 改为锚定在 source box 边框上。
+- source/target 两侧统一使用桥接线策略。
+- 锚点坐标增加 clamp,防止落到 box 范围外。
+- meta 与 label avoid 同步改造。
+
+### 验证
+- 关键 TS 测试通过。
+- Rust `cargo test` 全通过。
+- 用户复现图验证通过。
+
+### 经验
+- 端点类修复必须同时检查 source 与 target 两侧。
+- 仅修单侧会留下“另一侧同构缺陷”。
+
+## 2026-02-08 11:33:04 - 修复 “实验执行器游离箭头”(experiment.task) + 性能小步优化
+
+### 问题
+- 用户复现图中,`Hat_ralph -> Hat_experiment_runner (experiment.task)` 的 `▼` 箭头看起来“游离/断线”。
+- 可验证特征:
+  - 箭头入边方向相邻格子没有对应笔画(例如 `▼` 上方不是 `│/┌/┐/┬/┼/...`)。
+
+### 根因
+- 箭头会被 clamp 到 target box 外侧一格(贴边),但末段 `lastPos` 可能落在另一列。
+- 旧 `drawEndpointBridge()` 仅支持同轴桥接:
+  - 只能补水平线或竖线,
+  - 无法保证“箭头入边方向”存在同向笔画,
+  - 导致视觉上像“水平线的尽头挂了一个竖向箭头”。
+
+### 修复
+- TypeScript(上游) `src/ascii/draw.ts`:
+  - `drawEndpointBridge()`:
+    - 支持 L 型桥接;
+    - 对 `dir=Up/Down && from.y===to.y` 增加 1-cell stem,保证竖向箭头(▲/▼)入边方向存在竖向笔画;
+    - 桥接拐点写入正确 corner 字符,保证线路连续可读。
+- Rust(本仓库):
+  - 同步 vendor bundle 到 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`(sha256: `66ef06df...`)。
+  - 新增回归测试 `tests/ascii_user_case_edge_endpoint_invariants.rs`:
+    - 只锁定用户反馈的关键边 `experiment.task`,
+    - 在最终文本的“终端 cell 网格”中断言 `▼` 上方必须有竖向笔画。
+  - 增加 dev-dep `unicode-width` 用于宽字符 cell 对齐(避免 emoji 导致测试索引错位)。
+
+### 性能优化
+- `drawArrow()` 里提前生成的 `labelCanvas = drawArrowLabel(...)` 已不再被 `drawGraph()` 使用。
+- 移除该冗余计算,减少每条 edge 一次 label 布局 + 一次 canvas 拷贝。
+
+### 验证
+- `scripts/sync-vendor-bundle.sh` 端到端验证通过 ✅
+- `cargo test` 全量通过 ✅
+- CLI 复现:
+  - `beautiful-mermaid-rs --ascii < /tmp/repro_user_case.mmd` 输出中不再出现“实验执行器上方游离箭头” ✅
+
+## 2026-02-08 13:54:03 - 修复 relaxed 下“右侧外圈大矩形”(绕路/绕圈观感)
+
+### 问题
+- 用户反馈:
+  - `experiment.result` 这条线看起来“绕了个圈”。
+- 实际复现后发现:
+  - `experiment.result` 自身 path 并不宽,但 integrator 相关边会在右侧画一个巨大外框,
+  - 读图时很容易把外框误认为是 `experiment.result` 的一部分。
+
+### 原因(根因)
+- relaxed 的候选路径排序里,我们对“拐点更少”的路线有偏好。
+- 但“大外圈矩形”往往只有 2~3 次转向:
+  - 在 cost 上会被误判为“更优雅”的路线,
+  - 从而击败更贴近图中心的候选,最终把图拉得很宽。
+
+### 修复
+- TypeScript(上游) `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/edge-routing.ts`
+  - 在 `candidateCostRelaxed()` 增加 `detourPenaltyRelaxed()`:
+    - 用 from/to 节点 3x3 block 的包围盒作为参考框。
+    - 计算路径 bbox 超出参考框的 detour(只统计超过 margin 的部分)。
+    - 仅当 detour 很大(> THRESHOLD=12)时才施加 soft penalty,控制影响面。
+    - 让 relaxed 优先选择“不过度远离节点包围盒”的候选,减少外圈。
+- Rust(本仓库)
+  - 执行 `scripts/sync-vendor-bundle.sh` 同步 bundle 到:
+    - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+  - 更新回归测试 `tests/ascii_user_case_edge_endpoint_invariants.rs`:
+    - 对关键边增加“相对右边界 detour 上限”的断言(extra_right <= 10)。
+
+### 验证
+- 端到端:
+  - `scripts/sync-vendor-bundle.sh` ✅
+  - `cargo test` ✅
+- 指标对比(同一复现图):
+  - `integration.rejected`:
+    - bbox max_x: 110 -> 90
+    - path len: 130 -> 109
+  - `integrator -> Complete (experiment.complete)`:
+    - bbox max_x: 98 -> 88
+    - path len: 113 -> 82
+
+### 经验
+- relaxed 的“美观”不能只看拐点数:
+  - “拐点少但绕得很远”的大矩形,对终端读图是灾难性的。
+- 用“相对阈值”(例如相对最右 node 边界)做回归断言,
+  - 比写死某个绝对坐标更稳健。
+
+## 2026-02-08 16:24:22 - 修复: relaxed 最近边端口 + label 拼接导致的“断线”
+
+### 问题
+- 用户复现图里,仍会出现:
+  - `integrator -> Complete (experiment.complete)` 起始段先“向右背向走一截”,导致绕路。
+  - 多个 edge label 在同一行发生覆盖与拼接,形成乱码(例如 `iexperiment.taskked`),
+    肉眼看就是断线 + 路径不可读。
+
+### 原因(根因)
+- relaxed 路由会在 fallback/扩展候选阶段尝试更多 startDir/endDir:
+  - cost 若只关注“步长/避让/拐点”,就可能选中背向端口(目标在左却从右侧出线),
+  - 进而出现“先反方向走”的局部绕路,并放大外圈风险。
+- label 绘制历史行为:
+  - 先为每条边生成一个独立 label layer,
+  - 最后一次性 merge 到画布,
+  - 导致每条 label 在选位置时看不到其它 label,重叠时只能互相覆盖,形成拼接字符串。
+
+### 修复
+- relaxed 端口“最近边”约束(不增加 A* 次数):
+  - TypeScript: `src/ascii/edge-routing.ts`
+  - `candidateCostRelaxed()` 增加 `nearestSidePenaltyRelaxed(candidate)`:
+    - startDir 背向 target / endDir 背向 source 时加惩罚;
+    - 当 |dx| vs |dy| 明显不对称时,轻微偏好占优轴端口(更贴近“最近边”)。
+- 拥挤节点留白(梳子口 lane 容量):
+  - TypeScript: `src/ascii/grid.ts`
+  - comb ports 扩容阶段增加 `extraCapacityForPorts()`(端口数>3 时额外扩 1~4),
+    让 lane 分布更疏,降低拥挤处字符合并概率。
+- Unicode relaxed label 避让与兜底(避免乱码/断线):
+  - TypeScript: `src/ascii/draw.ts`
+  - 仅在 `routing=relaxed && useAscii=false` 启用:
+    - label 逐边直接画进 `graph.canvas`,后画 label 能看到先画 label;
+    - 把“已有文本字符”(非线段字符)当作 forbidden cell,避免覆盖其它 label/node text;
+    - 若线段范围内找不到合法位置,允许放宽搜索,仍不可行则不画该 label(避免乱码)。
+- Rust 侧配套:
+  - `tests/ascii_user_case_edge_endpoint_invariants.rs`:
+    - 将 `experiment.complete` 的 debug 打印前置,保证断言失败时可直接看到 path 细节。
+  - 更新 golden:
+    - `tests/testdata/unicode/ampersand_lhs_and_rhs.txt`
+  - 同步 vendor:
+    - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+
+### 验证
+- `scripts/sync-vendor-bundle.sh` ✅
+- `cargo test` ✅
+- CLI 复现图:
+  - `iexperiment.taskked` 不再出现(不再有 label 拼接)。
+  - `experiment.complete` 起始段不再先朝右背向走。
+
+## 2026-02-08 17:29:11 - box 边长不足 + 双箭头难读(Unicode crossing)
+
+### 问题
+- 用户复现图中:
+  - `ralph#1 (coordinator)` 同侧端口多,但 box 边长不够,端口挤在一起,影响可读性。
+  - `complete` 与“结果审计员”之间出现 `◄────────────────────►`,容易误读成“存在双向边”。
+  - `experiment.result` 看起来像绕圈/断线(本质是拐点被桥化断开后产生的视觉歧义)。
+
+### 原因(根因)
+- comb ports 的端口统计只识别 Up/Down/Left/Right:
+  - relaxed fallback 在不可达场景会使用 corner port(UpperLeft/LowerRight/...),
+  - corner port 未计入拥挤度 => box 不会按真实端口数扩容。
+- Unicode crossing 的桥化策略在拐点处会破坏连通:
+  - `deambiguateUnicodeCrossings()` 将 `┼` 直接桥化成 `─/│`,
+  - 当 `┼` 恰好落在“边的拐点”上时,会把边断开,造成“双箭头直线/断线”的错觉。
+
+### 修复
+- corner port 计入拥挤度(触发 box 自适应扩容):
+  - TypeScript: `src/ascii/grid.ts`
+  - `dirToSide(d,node,other)` 支持 corner port:
+    - 按 |dx| vs |dy| 映射到最近侧边(用于 counts/扩容/offset 分配)。
+- crossing 去歧义: 拐点优先降级为 tee/corner,避免断线:
+  - TypeScript:
+    - `src/ascii/draw.ts` 新增 `computeEdgeCornerArmMasks()` 提供拐点连通掩码
+    - `src/ascii/index.ts` 将掩码传入桥化逻辑,并采用“后写覆盖(last wins)”避免 FULL_MASK
+    - `src/ascii/canvas.ts`:
+      - 桥化遇到拐点 `┼` 时优先降级为 `┬/┴/├/┤/┐/┘/┌/└`
+      - 保留拐点连通,同时让穿越线路在该格断开(减少误读)
+- golden 更新:
+  - `tests/testdata/unicode/ampersand_lhs_and_rhs.txt`
+
+### 验证
+- `cargo test` ✅
+- `make install` ✅(已更新安装版 `/Users/cuiluming/local_doc/l_dev/tool/beautiful-mermaid-rs`)
+- CLI 复现图:
+  - ralph box 自动增高(满足端口数量需求)
+  - `complete` 与“结果审计员”之间出现清晰的 junction(例如 `◄──┴──►`),不再是难读的纯双箭头直线
+
+## 2026-02-08 22:03:31 - `◄──┴──►` 共享走线假象(单端口 center lane 对齐)
+
+### 问题
+- 用户复现图中:
+  - 你仍然认为 `◄──┴──►` 难以理解,并要求“尽量不要共享走线”。
+  - `complete` 与“结果审计员”在画布中部被读成“存在双向边”。
+
+### 原因(根因)
+- relaxed Unicode comb ports 在某个 side 只有 1 条边时:
+  - 旧逻辑固定把端口 offset 放在 center lane。
+  - 多个节点的 center lane 在画布中部容易对齐,
+    使两条无关边在某个 cell 发生 point overlap,最终合成 `┴/┬/├/┤` 这类 junction。
+
+### 修复
+- 上游 TypeScript:
+  - `src/ascii/grid.ts`
+  - comb ports `assign()`:
+    - 当 `list.length===1` 时,按 `side + kind(start/end)` 做 1 格确定性 nudge,
+      打散 center lane,减少 point overlap。
+- 本仓库落盘:
+  - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`(通过 `scripts/sync-vendor-bundle.sh` 同步)
+  - 回归测试加固:
+    - `tests/ascii_user_case_edge_endpoint_invariants.rs` 断言关键两条边 overlap_cells 必须为 0。
+  - golden 同步:
+    - `UPDATE_GOLDEN=1 cargo test --test ascii_testdata` 更新 `tests/testdata/unicode/*.txt`(lane 偏移变化)。
+
+### 验证
+- `cargo test` ✅
+- CLI 复现图:
+  - `complete` 与审计员之间不再出现 `◄──┴──►` 误连线视觉假象。
+
+## 2026-02-09 12:04:24 - meta 端点不变量回归: “箭头贴边了,但 path.last() 还在 box 里”
+
+### 现象
+- `cargo test --release` 失败:
+  - `tests/ascii_endpoint_alignment.rs`
+  - `tests/ascii_user_case_edge_endpoint_invariants.rs`
+- 典型失败边:
+  - `Hat_experiment_auditor -> Hat_ralph (experiment.reviewed)`:
+    - meta.last=`(41,19)`(box 内)
+    - 但最终文本在同一行存在 `│◄`(箭头在 x=49 已贴边)
+  - `Hat_experiment_integrator -> Complete (experiment.complete)`:
+    - meta.last=`(41,47)`(box 内)
+    - 最终文本箭头同样贴边(x=49),说明“绘制 OK,meta 错位”
+
+### 原因(根因)
+- 上游 TS `src/ascii/draw.ts` 的 `computeEdgeStrokeCoords()`:
+  1) 去重策略问题:
+     - 使用 `pushUnique` 保留“第一次出现”的坐标。
+     - 当 columnWidth/rowHeight 伸缩导致末段线段提前经过 arrowPos 时,
+       arrowPos 会先被当作“线段坐标”写入,后续无法稳定落在 path 末尾。
+  2) 末段退化方向问题(边界条件):
+     - offsetFrom/offsetTo 下,某些末段可能退化为单点 lastLine,
+       drawArrowHead 会用 fallbackDir 决定箭头方向。
+     - meta 若直接用 edge.path[-2..] 推 dir,可能与实际绘制的 dir 不一致。
+
+### 修复
+- 上游 TS: `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/draw.ts`
+  - `computeEdgeStrokeCoords()`:
+    - 对齐 drawArrowHead 的 dir/lastPos 推断(记录末段 lastLine 与 fallbackDir)。
+    - 新增 `pushUniqueLast()`:
+      - 若 arrowPos 已出现过,先移除旧位置,再 push 到末尾;
+      - 保持“去重”同时保证 `path.last()` 永远是箭头 cell。
+- Rust 仓库:
+  - `scripts/sync-vendor-bundle.sh` 重建并同步:
+    - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+  - golden 更新:
+    - `tests/testdata/unicode/preserve_order_of_definition.txt`
+
+### 验证
+- `cargo test` ✅
+- `cargo test --release` ✅
+
+### 经验
+- meta 与最终文本必须在“端点语义”上完全一致:
+  - 箭头是最后写入的关键格子,消费方会自然把 `path.last()` 当作箭头位置。
+- 对 path 做去重时,不能只考虑“集合唯一性”:
+  - 还要保留“语义顺序”(例如 arrowPos 必须在末尾)。
+
+## 2026-02-09 12:32:30 - 防回归: 上游 TS 增加 meta 端点语义测试(Unicode relaxed)
+
+### 问题
+- 本次 bug 的危险点在于:
+  - 最终字符画看起来“箭头贴边没问题”,
+  - 但 meta 的 `edge.path.last()` 可能停在 box 内部,或停在非箭头格子。
+- 这种回归会让 UI 动画/上色等 meta 消费方出现“断线/错位”,而肉眼不一定第一时间看出来。
+
+### 修复
+- 上游 TypeScript 在现有测试上做加固(改良胜过新增):
+  - `src/__tests__/ascii-with-meta-roundtrip.test.ts` 新增 relaxed 回归用例:
+    - 对用户复现图的每条 edge:
+      - 断言 `path.last()` 必须贴着 target box 外侧一格。
+      - 断言 `text` 在该坐标必须是箭头符号(▲▼◄►◥◤◢◣/●)。
+    - 用 `charDisplayWidth()` 做“显示列宽”映射,解决宽字符导致的 cell 坐标读取偏移。
+    - 由于该图渲染约 8s,该用例单独设置 20s timeout,避免 bun 默认 5s 误报超时失败。
+
+### 验证
+- `bun test src/__tests__/ascii-with-meta-roundtrip.test.ts` ✅
+- `cargo test --release` ✅
+
+### 备注(后续可做的改进)
+- ASCII strict 在该复现图上 `meta.nodes` 为空,更像是 strict 路由不可达或 layout retry 策略不足导致。
+  - 这属于“strict 可达性/性能”方向,建议单开一个任务线专门处理,避免和 meta 语义回归混修。
+
+## 2026-02-09 13:17:10 - `beautiful-mermaid-rs --ascii` 输出崩坏: native relaxed 与 TS 语义不一致
+
+### 问题
+- 用户复现命令:
+  - `printf 'flowchart TD ...' | beautiful-mermaid-rs --ascii`
+- 现象:
+  - 输出变得非常混乱(线路穿 box,大量 junction,可读性崩坏)。
+  - 同一份 Mermaid,TS(bun) 输出明显更正常,说明 Rust CLI 行为偏离上游基线。
+
+### 原因(根因)
+- Rust `src/js.rs` 会注入 `globalThis.__bm_getPath*`，bundle 检测到后走 native A*。
+- native `get_path_relaxed` 曾把 TS 的 usedPoints(point overlap) hard rule 改成 penalty:
+  - A* 更容易走进占用点位,在字符画里合成 `┬/┴/├/┤` 等强歧义 junction,
+  - 导致整体可读性严重退化。
+
+### 修复
+- `src/native_pathfinder.rs`:
+  - `get_path_relaxed` 的 usedPoints 处理改回 TS hard rule:
+    - 非起点第一步: 禁止走进任何已占用点位；
+    - 起点第一步: arms>=3 禁止；
+    - 终点前一步: arms>=4 禁止(允许 T junction 汇入,但禁止 `┼`)。
+  - 移除点重叠 penalty(RELAXED_PENALTY_USED_POINT*)，避免 native 与 TS 成本函数偏离。
+- `src/js.rs` + `.envrc`:
+  - 默认仍启用 native(保证 QuickJS 下速度)。
+  - 新增 `BM_DISABLE_NATIVE_PATHFINDER=1` 用于对照/排错(默认 0)。
+- 回归加固:
+  - 新增 golden: `tests/testdata/unicode/user_repro_case.txt` 锁死该复现图完整输出。
+  - 更新 `tests/testdata/unicode/preserve_order_of_definition.txt` 同步新基线。
+
+### 验证
+- Rust 输出与 TS(bun) 输出一致(仅差末尾换行)。
+- `cargo test --release` ✅
+
+## 2026-02-09 16:35:40 - 输出仍不够可读: TD 双向边导致 backward edge 绕外圈
+
+### 问题
+- 同一份 Mermaid 在 `beautiful-mermaid-rs --ascii` 下虽然不再“崩坏”,但仍然出现:
+  - 多条边被挤到画布最外圈绕行,
+  - 视觉上像画了一个巨大的“外框”,人类几乎无法读。
+
+### 原因(根因)
+- TD 布局默认会把同一父节点的多个 child 放在同一层并横向铺开。
+- 当 parent 与 child 存在双向边(A->B 与 B->A)时:
+  - B->A 会变成“向上走”的长 backward edge,
+  - 在“禁止非法共线/点位冲突”的约束下,很容易被挤到外圈。
+
+### 修复
+- 上游 TS: `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/grid.ts`
+  - 仅在 TD + Unicode relaxed 启用启发式(控制影响面):
+    - 若发现 `child -> parent` 反向边存在,则把 child 下沉到下一层(`childLevel + gridStep`),
+      并优先与 parent 对齐同一列(`x = parent.x`)。
+    - 让双向关系更像“垂直回路”,减少跨列 backward edge,降低外圈绕行概率。
+- Rust: 同步 vendor bundle:
+  - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+- 回归同步:
+  - `tests/testdata/unicode/user_repro_case.txt` 更新 golden(更可读的新布局)
+
+### 验证
+- `cargo test --release` ✅
+- CLI 复现: 外框显著收敛,节点更集中,边更短。
+
+## 2026-02-09 17:38:55 - 画布宽度膨胀: determineLabelLine 无条件扩列导致空白过大
+
+### 问题
+- 在 edge label 较长时,Unicode relaxed 的字符画会出现:
+  - 大量无意义空白,
+  - 进一步放大 detour 的视觉成本,让人觉得“更像外框”。
+
+### 原因(根因)
+- 上游 TS `determineLabelLine()` 在选定 `labelLine` 后,
+  会把某一整列 `columnWidth` 直接拉到 `labelWidth+2`。
+- 但对水平线段来说,决定 label 能否放下的是**线段总宽度**(跨多列的 Σ columnWidth),
+  这种“无条件扩一整列”在多数场景是过度的,会把整张图撑大。
+
+### 修复
+- 上游 TS: `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/edge-routing.ts`
+  - `determineLabelLine()` 改为“最小增量扩列”:
+    - 计算 `currentTotalWidth = calculateLineWidth(graph, chosenLine)`；
+    - 仅当 `currentTotalWidth < labelWidth+2` 时,才对 `widenX` 增加 `delta`。
+- Rust: 同步 vendor bundle:
+  - `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+- golden 同步:
+  - `tests/testdata/ascii/subgraph_with_labels.txt`
+  - `tests/testdata/unicode/user_repro_case.txt`
+
+### 验证
+- `cargo test --release` ✅
+- 复现图: 画布宽度明显收敛,整体更集中。
+
+### 备注
+- 我尝试过“改路由顺序”来让某条边更直,但发现只是把外框从一条边转移到另一条边,
+  并可能引入 label 贴边框风险,因此已回滚,保持 insertion order 作为稳定基线。
+
+## 2026-02-09 19:18:03 - 回归: Flowchart 主干边被挤成“外框”(detour),导致终端不可读
+
+### 问题
+- 用户复现图在 `beautiful-mermaid-rs --ascii` 下出现“顶层大矩形外框”,并伴随大量合并线团。
+- 该外框肉眼看起来像 subgraph 边框,但实际上是某条 edge path 绕到最外圈造成的。
+
+### 原因(根因)
+- Unicode relaxed 仍有“禁止 segment overlap”的 hard rule,通道资源非常敏感。
+- 当关键主干边在 Mermaid 文本里出现得很靠后时:
+  - 前面的回边/补充边会先占满内圈通道；
+  - 主干边只能选择最外圈绕行,从而把整张图“框起来”。
+
+### 修复
+- 上游 TS: `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/grid.ts`
+  - Unicode + relaxed 下,采用 spanning forest 优先路由:
+    - 先路由覆盖全部节点的主干边(primary),
+    - 再路由剩余边(secondary)。
+  - 同一优先级内保持 insertion order,保证确定性。
+- Rust:
+  - 同步 vendor bundle: `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js`
+  - 更新 golden: `tests/testdata/unicode/user_repro_case.txt`
+  - 修复测试不稳定断言: `tests/ascii_endpoint_alignment.rs`
+
+### 验证
+- `cargo test --release` ✅
+- 用户复现命令输出中,`integration.task` 不再生成顶层外框,整体明显更集中、更可读 ✅
+
+## 2026-02-09 21:29:00 - 修复 TS relaxed 路由运行时错误: `segmentPairMulti is not defined`
+
+### 问题
+- 在 TS 上游执行 relaxed 路由测试时出现运行时异常:
+  - `ReferenceError: segmentPairMulti is not defined`
+- 报错位置:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/pathfinder.ts`
+  - `getPathRelaxed()` 内部 `isSamePairSegment()`
+
+### 原因(根因)
+- `constraints.segmentUsage` 中已有:
+  - `segmentPair`
+  - `segmentPairMulti`
+- 但 `getPathRelaxed()` 的局部变量展开遗漏了这两个字段,
+  导致函数体直接访问未声明变量而崩溃。
+
+### 修复
+- 文件:
+  - `/Users/cuiluming/local_doc/l_dev/ref/typescript/beautiful-mermaid/src/ascii/pathfinder.ts`
+- 调整:
+  - 在 `segmentUsage` 解构区补上:
+    - `const segmentPair = segmentUsage.segmentPair`
+    - `const segmentPairMulti = segmentUsage.segmentPairMulti`
+
+### 验证
+- `bun test src/__tests__/unicode-relaxed-comb-ports-star.test.ts` ✅
+- `cargo test` ✅

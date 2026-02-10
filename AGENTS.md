@@ -21,6 +21,7 @@
 - `cargo test`: run all tests (golden ASCII/Unicode + SVG smoke).
 - `printf 'graph LR\nA --> B\n' | cargo run --quiet`: run CLI (SVG to stdout).
 - `printf ... | cargo run --quiet -- --ascii [--use-ascii]`: ASCII/Unicode output.
+- Debug meta + endpoints (Hat user case): `cargo run --release --example debug_user_case_meta`
 - `make release`: `cargo build --release`.
 - `make install INSTALL_DIR=/path/to/bin`: sync bundle + `cargo test` + `cargo build --release` + install `target/release/beautiful-mermaid-rs`.
   - Override TS repo path via `TS_REPO_DIR=/path/to/beautiful-mermaid`.
@@ -28,6 +29,10 @@
 - `make sync-vendor-verify`: sync bundle + run `cargo test` (recommended).
   - Override TS repo path via `TS_REPO_DIR=/path/to/beautiful-mermaid`.
   - Implementation: `scripts/sync-vendor-bundle.sh`.
+
+## Useful Env Vars
+
+- `BM_DISABLE_NATIVE_PATHFINDER=1`: force pure-JS A* in QuickJS (debug only; can be extremely slow).
 
 ## Coding Style & Naming Conventions
 

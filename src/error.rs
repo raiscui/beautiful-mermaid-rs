@@ -18,6 +18,10 @@ pub enum BeautifulMermaidError {
     #[error("JS 引擎错误: {0}")]
     Js(#[from] rquickjs::Error),
 
+    /// JS 主动抛出的异常（可提取 message/stack），用于输出更可读的定位信息。
+    #[error("JS 异常: {message}{details}")]
+    JsException { message: String, details: String },
+
     /// JS bundle 初始化失败（比如 bundle 文件缺失或 eval 失败）。
     #[error("初始化失败: {message}")]
     Init { message: String },

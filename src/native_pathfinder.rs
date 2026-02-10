@@ -116,7 +116,16 @@ const CONNECT_UP: u8 = 1 << 2;
 const CONNECT_DOWN: u8 = 1 << 3;
 const H_MASK: u8 = CONNECT_LEFT | CONNECT_RIGHT;
 const V_MASK: u8 = CONNECT_UP | CONNECT_DOWN;
+/// 4-bit bitcount 查表(0..15)：
+/// - usedPoints 的方向 mask 只使用 4 个 bit
+/// - 热循环里避免 popcount/循环,用查表更快也更稳定
+const BITCOUNT_4: [u8; 16] = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
 const RELAXED_PENALTY_CROSSING: u32 = 1;
+// 点重叠规则(relaxed hard rule,与 TS 保持一致):
+// - relaxed 允许 crossing(交错),并对“会形成 `┼` 的潜在交叉点”加轻量惩罚；
+// - 但对 point overlap(走进已占用点)采取 hard forbid:
+//   - 除“起点第一步”与“终点前一步”的受控豁免外,禁止走进任何已占用点位；
+//   - 这样能避免在字符画里合成 `┬/┴/├/┤` 这类强歧义 junction,也能显著缩小 A* 搜索空间。
 
 /// Rust 侧复用的 A* 缓存（对应 TS 的 AStarContext，但不持有 blocked/usage 输入）。
 #[derive(Default)]
@@ -668,6 +677,8 @@ impl NativeAStar {
         blocked: &[u8],
         segment_used: &[u8],
         used_as_middle: &[u8],
+        segment_pair: &[u32],
+        segment_pair_multi: &[u8],
         start_source: &[u32],
         start_source_multi: &[u8],
         end_target: &[u32],
@@ -695,15 +706,19 @@ impl NativeAStar {
         let seg_count = cell_count.saturating_mul(2);
         if segment_used.len() < seg_count
             || used_as_middle.len() < seg_count
+            || segment_pair.len() < seg_count
+            || segment_pair_multi.len() < seg_count
             || start_source.len() < seg_count
             || start_source_multi.len() < seg_count
             || end_target.len() < seg_count
             || end_target_multi.len() < seg_count
         {
             return Err(format!(
-                "segmentUsage 长度不足: seg_count={seg_count}, segment_used={}, used_as_middle={}, start_source={}, start_source_multi={}, end_target={}, end_target_multi={}",
+                "segmentUsage 长度不足: seg_count={seg_count}, segment_used={}, used_as_middle={}, segment_pair={}, segment_pair_multi={}, start_source={}, start_source_multi={}, end_target={}, end_target_multi={}",
                 segment_used.len(),
                 used_as_middle.len(),
+                segment_pair.len(),
+                segment_pair_multi.len(),
                 start_source.len(),
                 start_source_multi.len(),
                 end_target.len(),
@@ -742,6 +757,13 @@ impl NativeAStar {
 
         let to_y = to / stride;
         let to_x = to - to_y * stride;
+        let stride_i32 = stride as i32;
+        let route_to_i32 = route_to_idx as i32;
+        let edge_pair_id = if edge_from_id <= 0xffff && edge_to_id <= 0xffff {
+            Some((edge_from_id << 16) | edge_to_id)
+        } else {
+            None
+        };
 
         while let Some((current_idx_u32, current_cost_at_push)) = self.heap.pop() {
             let current = current_idx_u32 as usize;
@@ -771,27 +793,75 @@ impl NativeAStar {
                 let next = current + 1;
                 if blocked[next] == 0 || next == to {
                     let mut penalty = 0;
+                    let mut ok = true;
+                    let seg_key = current * 2;
+                    let same_pair_segment = match edge_pair_id {
+                        Some(pair) => {
+                            segment_pair_multi[seg_key] == 0 && segment_pair[seg_key] == pair
+                        }
+                        None => false,
+                    };
                     if let Some(points) = used_points {
                         penalty += crossing_penalty(points[current], CONNECT_RIGHT);
                         penalty += crossing_penalty(points[next], CONNECT_LEFT);
+
+                        if next != to {
+                            let mask = points[next];
+                            if mask != 0 {
+                                let diff_to_target = route_to_i32 - next as i32;
+                                let is_pre_target = diff_to_target == 1
+                                    || diff_to_target == -1
+                                    || diff_to_target == stride_i32
+                                    || diff_to_target == -stride_i32;
+
+                                // point overlap hard rule（与 TS 侧保持一致）：
+                                // - 非起点第一步: 禁止走进任何已占用点；
+                                // - 起点第一步 / 终点前一步: 只允许走进“不会形成强歧义 junction”的点位。
+                                let next_mask = (mask | CONNECT_LEFT) & 0x0F;
+                                let arms = BITCOUNT_4[next_mask as usize];
+
+                                // 同端点平行边共享干线:
+                                // - 允许“走进已占用点”,从而复用整条路径；
+                                // - 但仍然禁止制造 3+ arms junction(否则又会变线团)。
+                                if same_pair_segment && arms <= 2 {
+                                    // ok: 复用既有直线段不会增加 arms
+                                } else if current_idx_u32 != route_from_idx && !is_pre_target {
+                                    ok = false;
+                                } else if current_idx_u32 == route_from_idx {
+                                    // 起点第一步: 不允许制造 3+ arms junction
+                                    if arms >= 3 {
+                                        ok = false;
+                                    }
+                                } else {
+                                    // 终点前一步: 允许 T junction(3 arms) 汇入,但禁止 `┼`(4 arms)
+                                    if arms >= 4 {
+                                        ok = false;
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    if is_segment_allowed_relaxed(
-                        current,
-                        next,
-                        /*seg_key=*/ current * 2,
-                        segment_used,
-                        used_as_middle,
-                        start_source,
-                        start_source_multi,
-                        end_target,
-                        end_target_multi,
-                        route_from_idx,
-                        route_to_idx,
-                        edge_from_id,
-                        edge_to_id,
-                        allow_end_segment_reuse,
-                    ) {
+                    if ok
+                        && is_segment_allowed_relaxed(
+                            current,
+                            next,
+                            /*seg_key=*/ seg_key,
+                            segment_used,
+                            used_as_middle,
+                            segment_pair,
+                            segment_pair_multi,
+                            start_source,
+                            start_source_multi,
+                            end_target,
+                            end_target_multi,
+                            route_from_idx,
+                            route_to_idx,
+                            edge_from_id,
+                            edge_to_id,
+                            allow_end_segment_reuse,
+                        )
+                    {
                         let new_cost = current_cost + 1 + penalty;
                         if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
                             self.cost_stamp[next] = stamp;
@@ -823,27 +893,65 @@ impl NativeAStar {
                 let next = current - 1;
                 if blocked[next] == 0 || next == to {
                     let mut penalty = 0;
+                    let mut ok = true;
+                    let seg_key = next * 2;
+                    let same_pair_segment = match edge_pair_id {
+                        Some(pair) => {
+                            segment_pair_multi[seg_key] == 0 && segment_pair[seg_key] == pair
+                        }
+                        None => false,
+                    };
                     if let Some(points) = used_points {
                         penalty += crossing_penalty(points[current], CONNECT_LEFT);
                         penalty += crossing_penalty(points[next], CONNECT_RIGHT);
+
+                        if next != to {
+                            let mask = points[next];
+                            if mask != 0 {
+                                let diff_to_target = route_to_i32 - next as i32;
+                                let is_pre_target = diff_to_target == 1
+                                    || diff_to_target == -1
+                                    || diff_to_target == stride_i32
+                                    || diff_to_target == -stride_i32;
+
+                                let next_mask = (mask | CONNECT_RIGHT) & 0x0F;
+                                let arms = BITCOUNT_4[next_mask as usize];
+
+                                if same_pair_segment && arms <= 2 {
+                                    // ok: 同端点平行边复用直线段
+                                } else if current_idx_u32 != route_from_idx && !is_pre_target {
+                                    ok = false;
+                                } else if current_idx_u32 == route_from_idx {
+                                    if arms >= 3 {
+                                        ok = false;
+                                    }
+                                } else if arms >= 4 {
+                                    ok = false;
+                                }
+                            }
+                        }
                     }
 
-                    if is_segment_allowed_relaxed(
-                        current,
-                        next,
-                        /*seg_key=*/ next * 2,
-                        segment_used,
-                        used_as_middle,
-                        start_source,
-                        start_source_multi,
-                        end_target,
-                        end_target_multi,
-                        route_from_idx,
-                        route_to_idx,
-                        edge_from_id,
-                        edge_to_id,
-                        allow_end_segment_reuse,
-                    ) {
+                    if ok
+                        && is_segment_allowed_relaxed(
+                            current,
+                            next,
+                            /*seg_key=*/ seg_key,
+                            segment_used,
+                            used_as_middle,
+                            segment_pair,
+                            segment_pair_multi,
+                            start_source,
+                            start_source_multi,
+                            end_target,
+                            end_target_multi,
+                            route_from_idx,
+                            route_to_idx,
+                            edge_from_id,
+                            edge_to_id,
+                            allow_end_segment_reuse,
+                        )
+                    {
                         let new_cost = current_cost + 1 + penalty;
                         if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
                             self.cost_stamp[next] = stamp;
@@ -875,27 +983,65 @@ impl NativeAStar {
                 let next = current + stride;
                 if blocked[next] == 0 || next == to {
                     let mut penalty = 0;
+                    let mut ok = true;
+                    let seg_key = current * 2 + 1;
+                    let same_pair_segment = match edge_pair_id {
+                        Some(pair) => {
+                            segment_pair_multi[seg_key] == 0 && segment_pair[seg_key] == pair
+                        }
+                        None => false,
+                    };
                     if let Some(points) = used_points {
                         penalty += crossing_penalty(points[current], CONNECT_DOWN);
                         penalty += crossing_penalty(points[next], CONNECT_UP);
+
+                        if next != to {
+                            let mask = points[next];
+                            if mask != 0 {
+                                let diff_to_target = route_to_i32 - next as i32;
+                                let is_pre_target = diff_to_target == 1
+                                    || diff_to_target == -1
+                                    || diff_to_target == stride_i32
+                                    || diff_to_target == -stride_i32;
+
+                                let next_mask = (mask | CONNECT_UP) & 0x0F;
+                                let arms = BITCOUNT_4[next_mask as usize];
+
+                                if same_pair_segment && arms <= 2 {
+                                    // ok: 同端点平行边复用直线段
+                                } else if current_idx_u32 != route_from_idx && !is_pre_target {
+                                    ok = false;
+                                } else if current_idx_u32 == route_from_idx {
+                                    if arms >= 3 {
+                                        ok = false;
+                                    }
+                                } else if arms >= 4 {
+                                    ok = false;
+                                }
+                            }
+                        }
                     }
 
-                    if is_segment_allowed_relaxed(
-                        current,
-                        next,
-                        /*seg_key=*/ current * 2 + 1,
-                        segment_used,
-                        used_as_middle,
-                        start_source,
-                        start_source_multi,
-                        end_target,
-                        end_target_multi,
-                        route_from_idx,
-                        route_to_idx,
-                        edge_from_id,
-                        edge_to_id,
-                        allow_end_segment_reuse,
-                    ) {
+                    if ok
+                        && is_segment_allowed_relaxed(
+                            current,
+                            next,
+                            /*seg_key=*/ seg_key,
+                            segment_used,
+                            used_as_middle,
+                            segment_pair,
+                            segment_pair_multi,
+                            start_source,
+                            start_source_multi,
+                            end_target,
+                            end_target_multi,
+                            route_from_idx,
+                            route_to_idx,
+                            edge_from_id,
+                            edge_to_id,
+                            allow_end_segment_reuse,
+                        )
+                    {
                         let new_cost = current_cost + 1 + penalty;
                         if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
                             self.cost_stamp[next] = stamp;
@@ -927,27 +1073,65 @@ impl NativeAStar {
                 let next = current - stride;
                 if blocked[next] == 0 || next == to {
                     let mut penalty = 0;
+                    let mut ok = true;
+                    let seg_key = next * 2 + 1;
+                    let same_pair_segment = match edge_pair_id {
+                        Some(pair) => {
+                            segment_pair_multi[seg_key] == 0 && segment_pair[seg_key] == pair
+                        }
+                        None => false,
+                    };
                     if let Some(points) = used_points {
                         penalty += crossing_penalty(points[current], CONNECT_UP);
                         penalty += crossing_penalty(points[next], CONNECT_DOWN);
+
+                        if next != to {
+                            let mask = points[next];
+                            if mask != 0 {
+                                let diff_to_target = route_to_i32 - next as i32;
+                                let is_pre_target = diff_to_target == 1
+                                    || diff_to_target == -1
+                                    || diff_to_target == stride_i32
+                                    || diff_to_target == -stride_i32;
+
+                                let next_mask = (mask | CONNECT_DOWN) & 0x0F;
+                                let arms = BITCOUNT_4[next_mask as usize];
+
+                                if same_pair_segment && arms <= 2 {
+                                    // ok: 同端点平行边复用直线段
+                                } else if current_idx_u32 != route_from_idx && !is_pre_target {
+                                    ok = false;
+                                } else if current_idx_u32 == route_from_idx {
+                                    if arms >= 3 {
+                                        ok = false;
+                                    }
+                                } else if arms >= 4 {
+                                    ok = false;
+                                }
+                            }
+                        }
                     }
 
-                    if is_segment_allowed_relaxed(
-                        current,
-                        next,
-                        /*seg_key=*/ next * 2 + 1,
-                        segment_used,
-                        used_as_middle,
-                        start_source,
-                        start_source_multi,
-                        end_target,
-                        end_target_multi,
-                        route_from_idx,
-                        route_to_idx,
-                        edge_from_id,
-                        edge_to_id,
-                        allow_end_segment_reuse,
-                    ) {
+                    if ok
+                        && is_segment_allowed_relaxed(
+                            current,
+                            next,
+                            /*seg_key=*/ seg_key,
+                            segment_used,
+                            used_as_middle,
+                            segment_pair,
+                            segment_pair_multi,
+                            start_source,
+                            start_source_multi,
+                            end_target,
+                            end_target_multi,
+                            route_from_idx,
+                            route_to_idx,
+                            edge_from_id,
+                            edge_to_id,
+                            allow_end_segment_reuse,
+                        )
+                    {
                         let new_cost = current_cost + 1 + penalty;
                         if self.cost_stamp[next] != stamp || new_cost < self.cost_so_far[next] {
                             self.cost_stamp[next] = stamp;
@@ -1102,6 +1286,8 @@ fn is_segment_allowed_relaxed(
     seg_key: usize,
     segment_used: &[u8],
     used_as_middle: &[u8],
+    segment_pair: &[u32],
+    segment_pair_multi: &[u8],
     start_source: &[u32],
     start_source_multi: &[u8],
     end_target: &[u32],
@@ -1114,6 +1300,28 @@ fn is_segment_allowed_relaxed(
 ) -> bool {
     if segment_used[seg_key] == 0 {
         return true;
+    }
+
+    // ---------------------------------------------------------------------
+    // 同端点平行边共享干线（终端可读性关键改良）
+    //
+    // 病灶:
+    // - 同一对节点(from->to)存在多条带 label 的边时,如果强行“禁止 segment overlap”,
+    //   这些边会被挤到不同通道,最后必然绕外圈形成大矩形,并制造大量 junction。
+    //
+    // 目标:
+    // - 仅对“完全相同端点的平行边”允许复用已占用 segment,
+    //   让它们共享同一条干线(视觉上更像同一关系的多种事件)。
+    //
+    // 安全阈:
+    // - segment_pair_multi=1 表示该 segment 曾被多个不同 pair 使用过,
+    //   此时禁止共享,避免把不相关的边合并成一条线(误连线灾难)。
+    // ---------------------------------------------------------------------
+    if edge_from_id <= 0xffff && edge_to_id <= 0xffff {
+        let edge_pair_id = (edge_from_id << 16) | edge_to_id;
+        if segment_pair_multi[seg_key] == 0 && segment_pair[seg_key] == edge_pair_id {
+            return true;
+        }
     }
 
     // 中间段永不允许复用：它必然意味着“合并后再分开”的重叠，读图会崩。
@@ -1147,11 +1355,20 @@ fn is_segment_allowed_relaxed(
 
     // 同源：只允许“起点段”复用，并且该段不能混入任何 end 复用（避免读图歧义）。
     if is_start_step {
+        // 重要取舍(终端可读性优先):
+        // - 不允许 start 段与 end 段共享同一 unit segment。
+        // - 否则双向边会在端口附近“合并成一条线”,人类很难追踪每条 label 的归属。
+        //
+        // 因此这里保持更强的约束:
+        // - start 段只允许与“同 source 的 start 段”复用；
+        // - 该 segment 不能同时作为任何边的 end 段(et 必须为 0)。
         return !et_multi && et == 0 && !ss_multi && ss == edge_from_id;
     }
 
     // 同靶：允许“终点段”复用（最后一段；仅 fallback 开启）。
     if is_end_step {
+        // 同靶：允许“终点段”复用（最后一段；仅 fallback 开启）。
+        // 但仍然禁止与任何 start 段混用(ss 必须为 0),否则会在 target 端口附近形成难以读懂的合并线。
         return !ss_multi && ss == 0 && !et_multi && et == edge_to_id;
     }
 
