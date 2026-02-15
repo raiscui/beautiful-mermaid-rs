@@ -51,12 +51,40 @@ pub struct RenderOptions {
 pub struct AsciiRenderOptions {
     /// true = 纯 ASCII（+ - | >），false = Unicode 线条（┌ ─ │ ►）。
     pub use_ascii: Option<bool>,
+    /// 边走线策略(对齐 TS: `routing`)。
+    ///
+    /// 取值语义(更偏“约束/代价函数”的差异,不强行定义谁更好):
+    /// - `Strict`: 约束更强,更偏向避免某些交叉形态,输出更紧凑但可能出现更多“干线复用/并线”。
+    /// - `Relaxed`: 约束更软,允许 crossing(交错)但会加惩罚,同时更强调避免点重叠导致的强歧义 junction。
+    ///
+    /// 默认值由 JS bundle 决定:
+    /// - `use_ascii=true` 时默认 `strict`
+    /// - `use_ascii=false` 时默认 `relaxed`
+    pub routing: Option<AsciiRouting>,
     /// 节点水平间距。
     pub padding_x: Option<i32>,
     /// 节点垂直间距。
     pub padding_y: Option<i32>,
     /// 节点盒子内部边框 padding。
     pub box_border_padding: Option<i32>,
+}
+
+/// ASCII/Unicode 的边走线策略(对齐 TS: `routing`)。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AsciiRouting {
+    Strict,
+    Relaxed,
+}
+
+impl AsciiRouting {
+    /// 转成 JS 侧约定的字符串值。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Relaxed => "relaxed",
+        }
+    }
 }
 
 // ============================================================================

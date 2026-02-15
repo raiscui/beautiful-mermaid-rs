@@ -15,7 +15,7 @@ pub mod types;
 pub use error::{BeautifulMermaidError, Result};
 pub use types::{
     AsciiBox, AsciiDrawingCoord, AsciiRenderMeta, AsciiRenderMetaEdge, AsciiRenderMetaNode,
-    AsciiRenderOptions, AsciiRenderWithMeta, MermaidValidation, RenderOptions,
+    AsciiRenderOptions, AsciiRenderWithMeta, AsciiRouting, MermaidValidation, RenderOptions,
 };
 
 /// 渲染 Mermaid -> SVG（阻塞）。

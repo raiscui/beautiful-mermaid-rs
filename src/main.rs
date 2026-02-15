@@ -66,6 +66,9 @@ fn main() {
   # 输出纯 ASCII 字符集（兼容性最好）
   beautiful-mermaid-rs --ascii --use-ascii < diagram.mmd
 
+  # 强制使用 strict 路由(与默认 relaxed 不同,可用于对照可读性)
+  beautiful-mermaid-rs --ascii --routing strict < diagram.mmd
+
   # 仅校验 Mermaid 语法（stdout 输出 true/false）
   beautiful-mermaid-rs --validate < diagram.mmd
 
@@ -75,6 +78,8 @@ fn main() {
 选项：
   --ascii         输出 ASCII/Unicode 文本（默认输出 SVG）
   --use-ascii     仅在 --ascii 模式下生效：强制使用纯 ASCII 字符
+  --routing <strict|relaxed>
+                 仅在 --ascii 模式下生效：strict/relaxed 两种路由策略(输出可能差异很大)
   --validate      校验 Mermaid 语法（不输出 SVG/ASCII），stdout 输出 true/false
   --validate-markdown
                  扫描 stdin 的 Markdown，校验其中所有 ```mermaid 代码块
@@ -189,66 +194,113 @@ fn main() {
     // --------------------------------------------------------------------
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+    #[derive(Debug, Default)]
+    struct CliArgs {
+        ascii: bool,
+        use_ascii: bool,
+        validate: bool,
+        validate_markdown: bool,
+        routing: Option<beautiful_mermaid_rs::AsciiRouting>,
+        help: bool,
+        version: bool,
+    }
+
+    fn parse_routing(value: &str) -> Option<beautiful_mermaid_rs::AsciiRouting> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "strict" => Some(beautiful_mermaid_rs::AsciiRouting::Strict),
+            "relaxed" => Some(beautiful_mermaid_rs::AsciiRouting::Relaxed),
+            _ => None,
+        }
+    }
+
+    // --------------------------------------------------------------------
+    // 做一点点“强约束”：
+    // - 仅支持极少量参数，避免 typo 静默被忽略，浪费排查时间
+    // - 对于带 value 的参数（例如 `--routing strict`），我们也显式解析
+    // --------------------------------------------------------------------
+    let mut cli = CliArgs::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-h" | "--help" => cli.help = true,
+            "-V" | "--version" => cli.version = true,
+            "--ascii" => cli.ascii = true,
+            "--use-ascii" => cli.use_ascii = true,
+            "--validate" => cli.validate = true,
+            "--validate-markdown" => cli.validate_markdown = true,
+            "--routing" => {
+                let value = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("");
+                if value.is_empty() {
+                    eprintln!("参数错误：`--routing` 需要一个值：strict 或 relaxed。");
+                    eprintln!("提示：可以先运行 `beautiful-mermaid-rs --help` 查看完整用法。");
+                    std::process::exit(2);
+                }
+                match parse_routing(value) {
+                    Some(routing) => cli.routing = Some(routing),
+                    None => {
+                        eprintln!("参数错误：`--routing` 的值无效: {value}");
+                        eprintln!("可选值: strict | relaxed");
+                        std::process::exit(2);
+                    }
+                }
+                idx += 1;
+            }
+            arg if arg.starts_with("--routing=") => {
+                let value = arg.trim_start_matches("--routing=");
+                match parse_routing(value) {
+                    Some(routing) => cli.routing = Some(routing),
+                    None => {
+                        eprintln!("参数错误：`--routing` 的值无效: {value}");
+                        eprintln!("可选值: strict | relaxed");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            arg => {
+                eprintln!("未知参数: {arg}");
+                eprintln!("提示：可以先运行 `beautiful-mermaid-rs --help` 查看完整用法。");
+                std::process::exit(2);
+            }
+        }
+        idx += 1;
+    }
+
+    if cli.help {
         print_help();
         return;
     }
 
-    if args.iter().any(|arg| arg == "-V" || arg == "--version") {
+    if cli.version {
         let bin = env!("CARGO_PKG_NAME");
         let version = env!("CARGO_PKG_VERSION");
         write_stdout_with_trailing_newline(&format!("{bin} {version}"));
         return;
     }
 
-    // --------------------------------------------------------------------
-    // 做一点点“强约束”：
-    // - 仅支持极少量参数，避免 typo 静默被忽略，浪费排查时间
-    // - `--use-ascii` 如果没配 `--ascii`，直接报错（否则会“看起来没效果”）
-    // --------------------------------------------------------------------
-    let has_ascii_flag = args.iter().any(|arg| arg == "--ascii");
-    let has_use_ascii_flag = args.iter().any(|arg| arg == "--use-ascii");
-    let has_validate_flag = args.iter().any(|arg| arg == "--validate");
-    let has_validate_markdown_flag = args.iter().any(|arg| arg == "--validate-markdown");
-
-    if has_use_ascii_flag && !has_ascii_flag {
+    if cli.use_ascii && !cli.ascii {
         eprintln!("参数错误：`--use-ascii` 需要与 `--ascii` 一起使用。");
         eprintln!("提示：可以先运行 `beautiful-mermaid-rs --help` 查看完整用法。");
         std::process::exit(2);
     }
 
-    if has_validate_flag && has_validate_markdown_flag {
+    if cli.routing.is_some() && !cli.ascii {
+        eprintln!("参数错误：`--routing` 仅在 `--ascii` 模式下生效。");
+        eprintln!("提示：例如 `beautiful-mermaid-rs --ascii --routing strict < diagram.mmd`。");
+        std::process::exit(2);
+    }
+
+    if cli.validate && cli.validate_markdown {
         eprintln!("参数错误：`--validate` 与 `--validate-markdown` 不能同时使用。");
         eprintln!("提示：可以先运行 `beautiful-mermaid-rs --help` 查看完整用法。");
         std::process::exit(2);
     }
 
-    if (has_validate_flag || has_validate_markdown_flag) && (has_ascii_flag || has_use_ascii_flag) {
+    if (cli.validate || cli.validate_markdown) && (cli.ascii || cli.use_ascii) {
         eprintln!(
             "参数错误：校验模式（`--validate*`）不能与渲染模式（`--ascii/--use-ascii`）混用。"
         );
         eprintln!("提示：可以先运行 `beautiful-mermaid-rs --help` 查看完整用法。");
         std::process::exit(2);
-    }
-
-    for arg in &args {
-        let is_supported = matches!(
-            arg.as_str(),
-            "--ascii"
-                | "--use-ascii"
-                | "--validate"
-                | "--validate-markdown"
-                | "-h"
-                | "--help"
-                | "-V"
-                | "--version"
-        );
-
-        if !is_supported {
-            eprintln!("未知参数: {arg}");
-            eprintln!("提示：可以先运行 `beautiful-mermaid-rs --help` 查看完整用法。");
-            std::process::exit(2);
-        }
     }
 
     let mut input = String::new();
@@ -266,13 +318,13 @@ fn main() {
     // --------------------------------------------------------------------
     // 校验模式：不输出图，只输出 true/false，便于脚本/CI 使用。
     // --------------------------------------------------------------------
-    if has_validate_markdown_flag {
+    if cli.validate_markdown {
         let is_valid = validate_markdown_mermaid_blocks(&input);
         write_stdout_with_trailing_newline(if is_valid { "true" } else { "false" });
         std::process::exit(if is_valid { 0 } else { 1 });
     }
 
-    if has_validate_flag {
+    if cli.validate {
         match beautiful_mermaid_rs::validate_mermaid(&input) {
             Ok(result) => {
                 write_stdout_with_trailing_newline(if result.is_valid { "true" } else { "false" });
@@ -297,13 +349,15 @@ fn main() {
         }
     }
 
-    let use_ascii_renderer = has_ascii_flag;
-    let force_pure_ascii = has_use_ascii_flag;
+    let use_ascii_renderer = cli.ascii;
+    let force_pure_ascii = cli.use_ascii;
 
     if use_ascii_renderer {
         let options = beautiful_mermaid_rs::AsciiRenderOptions {
             // `--use-ascii`：输出纯 ASCII 字符集；否则输出 Unicode 线条字符
             use_ascii: Some(force_pure_ascii),
+            // 让用户可显式切换路由策略,用于在“紧凑度/可读性”之间做取舍对照。
+            routing: cli.routing,
             ..Default::default()
         };
 

@@ -29,10 +29,12 @@
 - `make sync-vendor-verify`: sync bundle + run `cargo test` (recommended).
   - Override TS repo path via `TS_REPO_DIR=/path/to/beautiful-mermaid`.
   - Implementation: `scripts/sync-vendor-bundle.sh`.
+- `make validate-docs`: validate Mermaid code fences in `README.md` + `docs/**/*.md`.
 
 ## Useful Env Vars
 
 - `BM_DISABLE_NATIVE_PATHFINDER=1`: force pure-JS A* in QuickJS (debug only; can be extremely slow).
+- `UPDATE_GOLDEN=1`: update golden testdata under `tests/testdata/{ascii,unicode}/*.txt` (writes files; rerun tests to confirm stable).
 
 ## Coding Style & Naming Conventions
 

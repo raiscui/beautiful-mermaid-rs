@@ -596,6 +596,9 @@ impl JsEngine {
         if let Some(value) = options.use_ascii {
             object.set("useAscii", value)?;
         }
+        if let Some(routing) = options.routing {
+            object.set("routing", routing.as_str())?;
+        }
         if let Some(value) = options.padding_x {
             object.set("paddingX", value)?;
         }

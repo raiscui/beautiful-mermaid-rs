@@ -127,7 +127,10 @@ Hat_ralph -->|integration.task| Hat_experiment_integrator
             };
             eprintln!("  - {}: last={last:?}, side={side}", edge.label);
         }
-        eprintln!("[debug] ralph box={:?} (max_x={}, max_y={})", ralph.box_rect, max_x, max_y);
+        eprintln!(
+            "[debug] ralph box={:?} (max_x={}, max_y={})",
+            ralph.box_rect, max_x, max_y
+        );
     }
 
     let edges_from_ralph: Vec<_> = result

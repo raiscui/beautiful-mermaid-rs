@@ -65,3 +65,32 @@
 ```bash
 make validate-docs
 ```
+
+### 开发者常用调试与回归范式(建议收藏)
+
+1. 先启用本仓库默认环境变量(避免误写 golden)
+
+```bash
+direnv allow
+```
+
+2. Golden tests 合法漂移时,用 `UPDATE_GOLDEN=1` 一键更新期望输出
+
+```bash
+UPDATE_GOLDEN=1 cargo test --test ascii_testdata --quiet
+# 注意: 测试会 panic 列出已更新文件,这是刻意设计,目的是强制你再跑一遍确认稳定。
+UPDATE_GOLDEN=0 cargo test --test ascii_testdata --quiet
+```
+
+3. 对照排查 native pathfinder 语义漂移(性能会很慢,仅用于 debug)
+
+```bash
+BM_DISABLE_NATIVE_PATHFINDER=1 cargo test --test ascii_testdata --quiet
+```
+
+4. 定量检查端点不变量与“绕外圈”问题(用户复现图专用)
+
+```bash
+cargo run --release --example debug_user_case_meta
+cargo run --release --example debug_user_case_meta -- --ascii
+```

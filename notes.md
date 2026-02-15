@@ -900,3 +900,84 @@
 #### 验证观察
 - 关键边不再被强制导向固定侧。
 - 路由结果由整体成本主导,符合“纯近路优先”目标。
+
+## 2026-02-11 00:18 - 四文件摘要(continuous-learning: 纯近路优先收口后的沉淀)
+
+- 任务目标(task_plan.md):
+  - 把 `beautiful-mermaid-rs --ascii` 的输出从“能渲染”提升到“人类可读”。
+  - 用户复现图的核心诉求是“最近侧边出/入线,少外圈绕行,少误连线错觉”。
+- 关键决定(task_plan.md):
+  - 先把输出拉回上游 TS 的可预期基线,再做改良。
+  - 用户澄清后,把策略回收为单一目标函数:
+    - 引述: "不是左侧优先,也不是右侧优先,而是纯近路优先"(task_plan.md)。
+- 关键发现(notes.md/ERRORFIX.md):
+  - QuickJS 无 JIT,纯 JS A* 在复杂图上可能慢到不可用。
+  - 因此 native pathfinder 默认必须保留,但语义必须与 TS 基线对齐,否则会出现“输出灾难”。
+  - “可读性增强”如果叠加方向偏置,很容易与“纯近路”目标打架:
+    - 引述: "可读性增强一旦上升到方向偏置,就可能违背\"纯近路\"目标"(ERRORFIX.md)。
+- 实际变更(WORKLOG.md):
+  - 多轮改良集中在两条线:
+    1) 并线标签: 先让同组标签共享几何锚点(x 对齐 + 起始列对齐),再追加最弱的纵向引导符。
+    2) relaxed 路由: 从“早收敛”改为“必要时探测 expandedAll 并按成本比较”,并在需求澄清后回收方向偏置。
+  - 每轮都同步 vendor bundle + 更新必要 golden,并用 `cargo test` 与 `make install` 做端到端验证。
+- 错误与根因(ERRORFIX.md):
+  - 输出变丑不一定是“审美问题”,也可能是 native 语义漂移导致的路径选择错误。
+  - 修复策略是用不变量测试锁死端点语义,再在可控范围内做启发式改良。
+- 可复用点候选(1-3 条):
+  1) Golden tests 建议提供 `UPDATE_GOLDEN=1` 的自动更新模式,并在更新后强制二次运行确认稳定。
+  2) 当用户需求从“偏好某侧”澄清为“纯近路优先”时,优先回收成单一成本函数,避免多策略互相打架。
+  3) 处理“标签可读性”问题时,先稳住几何约束(统一列/统一起始列),再叠加最弱提示,避免引入新的视觉歧义。
+- 是否需要固化到 docs/specs: 是。
+  - docs: 补充“golden 更新范式 + 调试开关”的可复制命令,减少重复踩坑。
+- 是否提取/更新 skill: 是。
+  - 计划新增跨项目 skill: `self-learning.golden-tests-update-mode`(当前 skills 中未发现同类,可新增)。
+
+## 2026-02-11 08:18 - routing(strict/relaxed) 选项与 UTF-8 截断 panic 修复建议
+
+### 1) routing 选项的事实来源(vendor JS)
+
+- 在 `vendor/beautiful-mermaid/beautiful-mermaid.browser.global.js` 里,ASCII 配置构造函数 `Ir()` 已包含 routing:
+
+  ```js
+  function Ir(t){
+    let e=t.useAscii??false,
+        r=t.routing??(e?"strict":"relaxed");
+    return {useAscii:e, ... , routing:r}
+  }
+  ```
+
+- 结论:
+  - `useAscii=false`(Unicode 线条)时,默认 routing=relaxed。
+  - `useAscii=true`(纯 ASCII 字符集)时,默认 routing=strict。
+
+### 2) 本仓库的落地方式(Rust -> JS)
+
+- 在 Rust 的 `AsciiRenderOptions` 新增 `routing: Option<AsciiRouting>`。
+- 在 QuickJS glue(`src/js.rs`)里把它透传为 JS options 的 `routing` 字段。
+- CLI(`src/main.rs`) 增加 `--routing strict|relaxed` 参数,仅在 `--ascii` 模式下生效。
+
+### 3) 你遇到的 UTF-8 截断 panic(外部项目)的修复要点
+
+- 现象:
+  - panic 信息为 `byte index 80 is not a char boundary`,说明代码在按字节做 `&s[..80]` 截断。
+  - 中文等 UTF-8 多字节字符会导致 index 落在字符中间,直接 panic。
+
+- 建议修复片段(按字节上限截断,但保证落在 char boundary):
+
+  ```rust
+  fn truncate_utf8_boundary(s: &str, max_bytes: usize) -> &str {
+      if s.len() <= max_bytes {
+          return s;
+      }
+
+      let mut end = max_bytes.min(s.len());
+      while end > 0 && !s.is_char_boundary(end) {
+          end -= 1;
+      }
+      &s[..end]
+  }
+  ```
+
+- 用法示例:
+  - 旧: `let preview = &cmd[..80];`
+  - 新: `let preview = truncate_utf8_boundary(&cmd, 80);`

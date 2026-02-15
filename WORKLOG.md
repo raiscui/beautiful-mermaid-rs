@@ -958,3 +958,33 @@
 - 全部测试通过。
 - 安装版已更新。
 - 路由行为满足“纯近路优先,不固定偏左/偏右”。
+
+## 2026-02-11 00:24 - continuous-learning: 四文件复盘与知识沉淀
+
+- 复盘摘要落盘: `notes.md` 追加“四文件摘要(continuous-learning: 纯近路优先收口后的沉淀)”。
+- 贡献者指南更新: `AGENTS.md` 补充 `UPDATE_GOLDEN` 与 `make validate-docs` 的长期约定。
+- CLI 文档改良: `docs/code-agent-cli.md` 增加调试与回归范式:
+  - `UPDATE_GOLDEN=1` 一键更新 golden 后二次确认
+  - `BM_DISABLE_NATIVE_PATHFINDER=1` 用于对照排查(很慢,仅 debug)
+  - `debug_user_case_meta` 用于定量检查端点不变量与绕路
+- 新增跨项目可复用 skill:
+  - `~/.codex/skills/self-learning.golden-tests-update-mode/SKILL.md`
+
+## 2026-02-11 08:18 - 暴露 routing(strict/relaxed) 开关,便于对照可读性
+
+### 目标
+- 你反馈“并线让逻辑难读”,我需要给你一个可控的开关,让同一份 Mermaid 能快速对照两种走线策略。
+
+### 改动
+- `src/types.rs`: 新增 `AsciiRouting` + `AsciiRenderOptions.routing`。
+- `src/js.rs`: Rust options 透传到 JS 的 `routing` 字段。
+- `src/main.rs`: 新增 CLI 参数 `--routing strict|relaxed` 并更新 `--help`。
+- `src/lib.rs`: re-export `AsciiRouting`。
+- `tests/ascii_routing_smoke.rs`: 回归测试(默认值=relaxed,strict 能产生差异)。
+
+### 用法
+- `beautiful-mermaid-rs --ascii --routing relaxed < diagram.mmd`(Unicode 默认即 relaxed)
+- `beautiful-mermaid-rs --ascii --routing strict < diagram.mmd`
+
+### 验证
+- `cargo test` ✅
