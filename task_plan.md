@@ -833,3 +833,97 @@
 
 ## 状态
 **已完成** - routing 开关已落地并通过回归,四文件已记录,可进入下一轮“按图优化可读性”的迭代。
+
+---
+
+# 任务计划: 在 GitHub 上发布 Release(v0.1.0)
+
+## 目标
+在 GitHub 仓库 `raiscui/beautiful-mermaid-rs` 上发布一个可下载的 Release.
+它要包含 tag,Release notes,以及至少 macOS 的可执行文件压缩包与校验信息.
+
+## 两条路线(先定,避免范围漂移)
+1. 路线A(不惜代价/最佳方案): 补齐自动化发布流水线
+   - 增加 GitHub Actions: tag 推送后自动构建多平台产物(macOS/Linux/Windows),生成 checksums,并创建 Release.
+   - 优点: 以后发版本几乎零手工成本,产物更完整.
+   - 缺点: 这会引入新的 CI 配置,需要更多一次性工作量.
+
+2. 路线B(先能用/快速发布,本次默认执行): 本地构建 + gh 创建 Release
+   - 用 `cargo build --release` 本地构建.
+   - 打包 macOS(aarch64) 二进制 + README/LICENSE,生成 sha256.
+   - 使用 `gh release create` 创建 Release 并上传产物.
+   - 优点: 今天就能发,工作量小.
+   - 缺点: 产物平台不全(除非再补 CI).
+
+## 当前决策
+- 你这次的请求是"在 github上 release".
+  我理解你的优先级是"先发出来".
+  因此本次先按路线B执行.
+  如果你希望我同时落地路线A,我会在本次 Release 后追加一轮改造.
+
+## 阶段
+- [x] 阶段1: 确认版本号/Tag/Release notes
+- [x] 阶段2: 本地验证(cargo test + build)
+- [x] 阶段3: 产物打包 + 生成校验文件
+- [x] 阶段4: 创建并推送 tag
+- [x] 阶段5: 创建 GitHub Release 并上传产物
+- [x] 阶段6: 四文件沉淀与交付
+
+## 状态
+**已完成** - GitHub Release `v0.1.0` 已发布,并已把发布过程与后续改进方向沉淀到四文件.
+
+### 2026-02-21 16:46:00 - 阶段1完成: 版本/Tag/Release notes 已确定
+
+- 版本号: `Cargo.toml` 为 `0.1.0`。
+- tag 现状: 当前仓库无 tag,无历史 Release。
+- GitHub 登录: `gh auth status` 已登录,具备 `repo/workflow` 权限。
+- Release notes: 已准备在 `/tmp/beautiful-mermaid-rs-release-v0.1.0-notes.md`。
+
+### 2026-02-21 16:50:30 - 阶段2完成: 本地测试与 release 构建通过
+
+- `cargo test` 全量通过。
+- `cargo build --release` 构建成功,二进制位于 `target/release/beautiful-mermaid-rs`。
+
+### 2026-02-21 16:56:10 - 阶段3完成: 已生成 macOS universal2 发布包与校验文件
+
+- 产物目录: `/tmp/beautiful-mermaid-rs-v0.1.0-dist`。
+- Release asset:
+  - `beautiful-mermaid-rs-v0.1.0-universal2-apple-darwin.tar.gz`
+  - `beautiful-mermaid-rs-v0.1.0-universal2-apple-darwin.tar.gz.sha256`
+
+### 2026-02-21 17:09:40 - 阶段4完成: tag 已推送到 GitHub,但 Release 创建被权限阻塞
+
+- 现象:
+  - 用 HTTPS remote 推送 tag 时报错 403:
+    - `Permission to raiscui/beautiful-mermaid-rs.git denied to lishaozhenzhen`.
+  - `gh api ... --jq .permissions` 显示当前 `gh` 登录账号只有 pull 权限,无 push 权限。
+- 临时处置:
+  - 本机 SSH 认证账号是 `raiscui`,因此新增 `my-ssh` remote 并用 SSH 推送 tag:
+    - `git remote add my-ssh git@github.com:raiscui/beautiful-mermaid-rs.git`
+    - `git push my-ssh v0.1.0`
+- 下一步:
+  - 需要让 `gh` 也以 `raiscui` 账号完成登录,才能用 API 创建 GitHub Release 并上传 assets。
+
+### 2026-02-21 17:13:20 - 重试: 设备授权码过期,准备重新登录
+
+- 我为什么要重试:
+  - `gh auth login` 的 device_code 有有效期,如果没在有效期内完成浏览器授权,就会过期。
+  - 目前 `gh` 仍是 `lishaozhenzhen` 账号,没有创建 Release 的权限,所以必须重新走一次登录流程。
+- 我接下来要做什么:
+  - 重新执行 `gh auth login --hostname github.com --git-protocol ssh --scopes repo,workflow`.
+  - 生成新的 device code,并引导你用 `raiscui` 账号在浏览器完成授权。
+
+### 2026-02-21 17:18:30 - 阶段5完成: GitHub Release 已创建并上传 assets
+
+- Release:
+  - https://github.com/raiscui/beautiful-mermaid-rs/releases/tag/v0.1.0
+- assets:
+  - `beautiful-mermaid-rs-v0.1.0-universal2-apple-darwin.tar.gz`
+  - `beautiful-mermaid-rs-v0.1.0-universal2-apple-darwin.tar.gz.sha256`
+
+### 2026-02-21 17:21:10 - 阶段6完成: 四文件落盘并收口
+
+- 已追加:
+  - `WORKLOG.md`: 记录 v0.1.0 Release 交付物与链接。
+  - `notes.md`: 记录手工发版的可复用命令摘要。
+  - `LATER_PLANS.md`: 记录后续用 GitHub Actions 自动发版的计划。

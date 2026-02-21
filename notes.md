@@ -981,3 +981,16 @@
 - 用法示例:
   - 旧: `let preview = &cmd[..80];`
   - 新: `let preview = truncate_utf8_boundary(&cmd, 80);`
+
+## 2026-02-21 - GitHub Release(v0.1.0) 发布流程备忘(手工版)
+
+- 目的: 不引入 CI 的前提下,最快发布一个可下载的 Release(含二进制与校验文件)。
+- 关键点: `gh` 必须以有 push 权限的账号登录(本次为 `raiscui`)。
+- 主流程(命令级摘要):
+  - `cargo test`
+  - `cargo build --release`
+  - `rustup target add x86_64-apple-darwin && cargo build --release --target x86_64-apple-darwin`
+  - `lipo -create target/release/beautiful-mermaid-rs target/x86_64-apple-darwin/release/beautiful-mermaid-rs -output beautiful-mermaid-rs`
+  - `tar -czf beautiful-mermaid-rs-v0.1.0-universal2-apple-darwin.tar.gz ... && shasum -a 256 > ...sha256`
+  - `git tag -a v0.1.0 -m "release: v0.1.0" && git push my-ssh v0.1.0`
+  - `gh release create v0.1.0 <asset> <asset>.sha256 --title "v0.1.0" --notes-file <notes>`

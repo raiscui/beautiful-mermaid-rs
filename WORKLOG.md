@@ -419,6 +419,13 @@
 
 ### 验证
 - `cargo test` ✅
+
+## 2026-02-21 - 发布 GitHub Release: v0.1.0
+
+- 创建并推送 tag: `v0.1.0`。
+- 本地构建并打包 macOS universal2 产物,生成 sha256 文件。
+- 使用 `gh release create v0.1.0 ...` 创建 Release 并上传 assets:
+  - https://github.com/raiscui/beautiful-mermaid-rs/releases/tag/v0.1.0
 - CLI 复现图对比:
   - `integration.blocked` 不再与其它 label 拼接成乱码;
   - `experiment.complete` 起始段不再先朝右“背向走一截”。
